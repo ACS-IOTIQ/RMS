@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: roster_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: roster
+      POSTGRES_PASSWORD: rosterpass
+      POSTGRES_DB: roster_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U roster -d roster_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: roster_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://roster:rosterpass@postgres:5432/roster_db?schema=public
+      JWT_SECRET: change-this-jwt-secret-in-production-please
+      JWT_EXPIRES_IN: 7d
+      PORT: 3001
+      CORS_ORIGIN: http://localhost:3000
+      ORG_CODE_PREFIX: ORG
+      ORG_CODE_PAD: 4
+      PROJECT_CODE_PREFIX: PROJ
+      PROJECT_CODE_PAD: 4
+      NODE_ENV: production
+    ports:
+      - "3001:3001"
+    command: sh -c "npx prisma db push --accept-data-loss --skip-generate && node dist/main.js"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:3001
+    container_name: roster_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:

@@ -1,0 +1,600 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  ROSTER_MANAGER
+  PROJECT_MANAGER
+  COMPLIANCE_ADMIN
+  EMPLOYEE
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  ON_LEAVE
+  RESIGNED
+  SUSPENDED
+  PROBATION
+  TRAINING
+  BENCH
+}
+
+enum ShiftType {
+  STANDARD
+  CRITICAL
+  FLEXIBLE
+  BACKUP
+}
+
+enum ShiftCode {
+  A // Morning
+  B // Evening
+  C // Night
+  G // General
+  F // Flexible
+}
+
+enum LeaveType {
+  CASUAL
+  SICK
+  EMERGENCY
+  PLANNED
+  MATERNITY
+  PATERNITY
+  UNPAID
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum RosterStatus {
+  WORKING
+  SCHEDULED
+  COMPLETED
+  SWAPPED
+  ON_LEAVE
+  WEEKLY_OFF
+  GENERAL
+  REPLACEMENT
+  EXTRA_DUTY
+  CANCELLED
+}
+
+enum WorkforceCategory {
+  PRIMARY
+  BACKUP
+  TRAINEE
+}
+
+enum WeeklyOffPolicy {
+  NONE
+  FIXED
+  ROTATING
+}
+
+enum RosterWeekStatus {
+  DRAFT
+  PREVIEWED
+  VALIDATION_FAILED
+  READY_TO_PUBLISH
+  PUBLISHED
+  ADJUSTED
+  LOCKED
+  STALE
+  CANCELLED
+}
+
+enum RoundingPolicy {
+  LARGEST_REMAINDER_DESIGNATION_PRIORITY
+  LARGEST_REMAINDER
+  BUSINESS_PRIORITY
+  DESIGNATION_PRIORITY
+  MANUAL_FIXED_COUNT
+}
+
+enum WeekStartDay {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+enum DayType {
+  ANY
+  WEEKDAY
+  WEEKEND
+}
+
+enum WeeklyGroup {
+  MORNING
+  AFTERNOON
+  NIGHT
+  GENERAL
+}
+
+enum RosterEntryType {
+  WORKING
+  WEEKLY_OFF
+  ON_LEAVE
+  GENERAL
+  REPLACEMENT
+  EXTRA_DUTY
+}
+
+enum AssignmentSource {
+  SYSTEM
+  MANUAL
+  OVERRIDE
+  REPLACEMENT
+}
+
+enum ReplacementSource {
+  BACKUP_POOL
+  SAME_SHIFT_OVERSTAFFED
+  SAME_LOCATION_OVERTIME
+  CROSS_LOCATION_APPROVED
+  MANUAL
+  UNRESOLVED
+}
+
+enum ReplacementStatus {
+  SUGGESTED
+  APPROVED
+  UNRESOLVED
+}
+
+enum OverrideSeverity {
+  NON_CRITICAL
+  CRITICAL
+}
+
+enum OverrideStatus {
+  PENDING_APPROVAL
+  APPROVED
+  APPLIED
+  REJECTED
+}
+
+model User {
+  id         String    @id @default(uuid())
+  email      String    @unique
+  password   String
+  role       UserRole  @default(EMPLOYEE)
+  employee   Employee? @relation(fields: [employeeId], references: [id])
+  employeeId String?   @unique
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+}
+
+model Organization {
+  id             String         @id @default(uuid())
+  name           String
+  code           String         @unique
+  projects       Project[]
+  rosterPolicies RosterPolicy[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+}
+
+model Project {
+  id                          String                   @id @default(uuid())
+  name                        String
+  code                        String                   @unique
+  clientName                  String?
+  timezone                    String                   @default("Asia/Kolkata")
+  organization                Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId              String
+  locations                   Location[]
+  departments                 Department[]
+  employees                   Employee[]
+  rosterPolicies              RosterPolicy[]
+  designationRequirements     DesignationRequirement[]
+  previousEmployeeAssignments AuditLog[]               @relation("PreviousProject")
+  updatedEmployeeAssignments  AuditLog[]               @relation("UpdatedProject")
+  createdAt                   DateTime                 @default(now())
+  updatedAt                   DateTime                 @updatedAt
+}
+
+model Location {
+  id                      String                   @id @default(uuid())
+  name                    String
+  timezone                String                   @default("Asia/Kolkata")
+  capacity                Int                      @default(100)
+  weeklyOffPolicy         WeeklyOffPolicy          @default(ROTATING)
+  fixedWeeklyOffDay       Int?
+  project                 Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId               String
+  shifts                  Shift[]
+  employees               Employee[]
+  departments             Department[]
+  rosterWeeks             RosterWeek[]
+  rosterPolicies          RosterPolicy[]
+  designationRequirements DesignationRequirement[]
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+}
+
+model Department {
+  id             String     @id @default(uuid())
+  name           String
+  capacity       Int        @default(0)
+  project        Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId      String
+  location       Location?  @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  locationId     String?
+  headEmployee   Employee?  @relation("DepartmentHead", fields: [headEmployeeId], references: [id], onDelete: SetNull)
+  headEmployeeId String?
+  employees      Employee[] @relation("EmployeeDepartment")
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  @@index([projectId])
+  @@index([locationId])
+}
+
+model Designation {
+  id                      String                   @id @default(uuid())
+  name                    String                   @unique
+  level                   Int                      @default(1)
+  isCritical              Boolean                  @default(false)
+  minStaffing             Int                      @default(1)
+  employees               Employee[]
+  shiftRequirements       ShiftRequirement[]
+  designationRequirements DesignationRequirement[]
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+}
+
+model Employee {
+  id                String            @id @default(uuid())
+  employeeCode      String            @unique
+  name              String
+  email             String            @unique
+  phone             String?
+  status            EmployeeStatus    @default(ACTIVE)
+  joinDate          DateTime          @default(now())
+  maxWeeklyHours    Int               @default(48)
+  preferredShifts   ShiftCode[]       @default([])
+  workforceCategory WorkforceCategory @default(PRIMARY)
+
+  designation   Designation @relation(fields: [designationId], references: [id])
+  designationId String
+
+  department   Department? @relation("EmployeeDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
+  departmentId String?
+
+  location   Location? @relation(fields: [locationId], references: [id])
+  locationId String?
+
+  project   Project? @relation(fields: [projectId], references: [id])
+  projectId String?
+
+  user              User?
+  rosterEntries     RosterEntry[]
+  leaves            Leave[]
+  notifications     Notification[]
+  headedDepartments Department[]            @relation("DepartmentHead")
+  weeklyAssignments WeeklyShiftAssignment[]
+  replacementDuties ReplacementAssignment[] @relation("ReplacementEmployee")
+  replacedDuties    ReplacementAssignment[] @relation("ReplacedEmployee")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id                String   @id @default(uuid())
+  action            String
+  entityType        String
+  entityId          String
+  actorUserId       String?
+  actorEmail        String?
+  employeeId        String?
+  previousProject   Project? @relation("PreviousProject", fields: [previousProjectId], references: [id], onDelete: SetNull)
+  previousProjectId String?
+  updatedProject    Project? @relation("UpdatedProject", fields: [updatedProjectId], references: [id], onDelete: SetNull)
+  updatedProjectId  String?
+  metadata          Json?
+  createdAt         DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([employeeId])
+  @@index([createdAt])
+}
+
+model Shift {
+  id                      String                   @id @default(uuid())
+  code                    ShiftCode
+  name                    String
+  startTime               String // "HH:mm" format
+  endTime                 String
+  type                    ShiftType                @default(STANDARD)
+  distribution            Int                      @default(33) // percentage allocation
+  priority                Int                      @default(0)
+  location                Location                 @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  locationId              String
+  requirements            ShiftRequirement[]
+  designationRequirements DesignationRequirement[]
+  rosterEntries           RosterEntry[]
+  weeklyAssignments       WeeklyShiftAssignment[]
+  replacementAssignments  ReplacementAssignment[]
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+
+  @@unique([locationId, code])
+}
+
+model RosterPolicy {
+  id                     String         @id @default(uuid())
+  organization           Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId         String
+  project                Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId              String
+  location               Location       @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  locationId             String         @unique
+  requiredDailyHeadcount Int            @default(49)
+  workingDaysPerEmployee Int            @default(6)
+  weeklyOffsPerEmployee  Int            @default(1)
+  shiftDistributionJson  Json           @default("{\"A\":40,\"B\":40,\"C\":20}")
+  roundingPolicy         RoundingPolicy @default(LARGEST_REMAINDER_DESIGNATION_PRIORITY)
+  generalBufferEnabled   Boolean        @default(true)
+  allowExtraDuty         Boolean        @default(true)
+  allowOvertime          Boolean        @default(true)
+  weekStartDay           WeekStartDay   @default(MONDAY)
+  minimumRestHours       Int            @default(12)
+  publishOverridePolicy  String         @default("CRITICAL_REQUIRES_APPROVAL")
+  isActive               Boolean        @default(true)
+  rosterWeeks            RosterWeek[]
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+
+  @@index([projectId])
+  @@index([locationId])
+}
+
+model DesignationRequirement {
+  id            String      @id @default(uuid())
+  project       Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId     String
+  location      Location    @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  locationId    String
+  shift         Shift       @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  shiftId       String
+  designation   Designation @relation(fields: [designationId], references: [id], onDelete: Cascade)
+  designationId String
+  requiredCount Int         @default(1)
+  dayType       DayType     @default(ANY)
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([projectId, locationId])
+  @@index([shiftId])
+  @@index([designationId])
+}
+
+model RosterWeek {
+  id                     String                    @id @default(uuid())
+  projectId              String?
+  location               Location                  @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  locationId             String
+  rosterPolicy           RosterPolicy?             @relation(fields: [rosterPolicyId], references: [id], onDelete: SetNull)
+  rosterPolicyId         String?
+  weekStart              DateTime                  @db.Date
+  weekEnd                DateTime                  @db.Date
+  status                 RosterWeekStatus          @default(DRAFT)
+  requiredDailyHeadcount Int                       @default(49)
+  workingDaysPerEmployee Int                       @default(6)
+  weeklyOffsPerEmployee  Int                       @default(1)
+  eligibleEmployeeCount  Int                       @default(0)
+  requiredWeeklySlots    Int                       @default(0)
+  availableWeeklySlots   Int                       @default(0)
+  extraOrShortageSlots   Int                       @default(0)
+  version                Int                       @default(1)
+  lockedByUserId         String?
+  lockedByEmail          String?
+  lockedAt               DateTime?
+  generatedByUserId      String?
+  generatedByEmail       String?
+  publishedByUserId      String?
+  publishedByEmail       String?
+  publishedAt            DateTime?
+  validationSummary      Json?
+  fairnessSummary        Json?
+  previousWeekComparison Json?
+  configHash             String?
+  snapshot               RosterGenerationSnapshot?
+  weeklyAssignments      WeeklyShiftAssignment[]
+  replacementAssignments ReplacementAssignment[]
+  rosterEntries          RosterEntry[]
+  overrides              RosterOverride[]
+  createdAt              DateTime                  @default(now())
+  updatedAt              DateTime                  @updatedAt
+
+  @@unique([locationId, weekStart])
+  @@index([status])
+  @@index([weekStart, weekEnd])
+}
+
+model RosterGenerationSnapshot {
+  id                  String     @id @default(uuid())
+  rosterWeek          RosterWeek @relation(fields: [rosterWeekId], references: [id], onDelete: Cascade)
+  rosterWeekId        String     @unique
+  shiftRules          Json
+  designationRules    Json
+  employeeEligibility Json
+  leaveData           Json
+  weeklyOffPolicy     Json
+  distributionRules   Json
+  configHash          String
+  createdAt           DateTime   @default(now())
+}
+
+model WeeklyShiftAssignment {
+  id                    String           @id @default(uuid())
+  rosterWeek            RosterWeek       @relation(fields: [rosterWeekId], references: [id], onDelete: Cascade)
+  rosterWeekId          String
+  employee              Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId            String
+  projectId             String?
+  locationId            String?
+  weeklyGroup           WeeklyGroup      @default(MORNING)
+  shift                 Shift            @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  shiftId               String
+  designationId         String?
+  workingDaysCount      Int              @default(0)
+  weeklyOffDate         DateTime?        @db.Date
+  weeklyOffDates        Json?
+  score                 Int              @default(0)
+  explanation           String?
+  assignmentExplanation String?
+  source                AssignmentSource @default(SYSTEM)
+  isManualOverride      Boolean          @default(false)
+  overrideReason        String?
+  rosterEntries         RosterEntry[]
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  @@unique([rosterWeekId, employeeId])
+  @@index([employeeId])
+  @@index([shiftId])
+}
+
+model ReplacementAssignment {
+  id                    String            @id @default(uuid())
+  rosterWeek            RosterWeek        @relation(fields: [rosterWeekId], references: [id], onDelete: Cascade)
+  rosterWeekId          String
+  date                  DateTime          @db.Date
+  shift                 Shift             @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  shiftId               String
+  requiredDesignationId String?
+  replacedEmployee      Employee?         @relation("ReplacedEmployee", fields: [replacedEmployeeId], references: [id], onDelete: SetNull)
+  replacedEmployeeId    String?
+  replacementEmployee   Employee?         @relation("ReplacementEmployee", fields: [replacementEmployeeId], references: [id], onDelete: SetNull)
+  replacementEmployeeId String?
+  source                ReplacementSource
+  status                ReplacementStatus @default(SUGGESTED)
+  overtimeFlag          Boolean           @default(false)
+  managerApproved       Boolean           @default(false)
+  approvedBy            String?
+  approvedAt            DateTime?
+  reason                String?
+  score                 Int               @default(0)
+  suggestionScore       Int               @default(0)
+  explanation           String?
+  rosterEntries         RosterEntry[]
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([rosterWeekId, date])
+  @@index([replacementEmployeeId])
+  @@index([replacedEmployeeId])
+}
+
+model RosterOverride {
+  id                String           @id @default(uuid())
+  rosterWeek        RosterWeek       @relation(fields: [rosterWeekId], references: [id], onDelete: Cascade)
+  rosterWeekId      String
+  severity          OverrideSeverity @default(NON_CRITICAL)
+  status            OverrideStatus   @default(APPLIED)
+  requestedByUserId String?
+  requestedByEmail  String?
+  approvedByUserId  String?
+  approvedByEmail   String?
+  reason            String
+  entityType        String
+  entityId          String?
+  oldValue          Json?
+  newValue          Json?
+  approvedAt        DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([rosterWeekId])
+  @@index([status])
+}
+
+model ShiftRequirement {
+  id            String      @id @default(uuid())
+  shift         Shift       @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  shiftId       String
+  designation   Designation @relation(fields: [designationId], references: [id])
+  designationId String
+  minCount      Int         @default(1)
+
+  @@unique([shiftId, designationId])
+}
+
+model RosterEntry {
+  id                       String                 @id @default(uuid())
+  employee                 Employee               @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId               String
+  shift                    Shift                  @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  shiftId                  String
+  rosterWeek               RosterWeek?            @relation(fields: [rosterWeekId], references: [id], onDelete: Cascade)
+  rosterWeekId             String?
+  weeklyAssignment         WeeklyShiftAssignment? @relation(fields: [weeklyAssignmentId], references: [id], onDelete: SetNull)
+  weeklyAssignmentId       String?
+  replacementAssignment    ReplacementAssignment? @relation(fields: [replacementAssignmentId], references: [id], onDelete: SetNull)
+  replacementAssignmentId  String?
+  date                     DateTime               @db.Date
+  status                   RosterStatus           @default(SCHEDULED)
+  entryType                RosterEntryType        @default(WORKING)
+  replacementForEmployeeId String?
+  source                   AssignmentSource       @default(SYSTEM)
+  isReplacement            Boolean                @default(false)
+  notes                    String?
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+
+  @@unique([employeeId, date])
+  @@index([date])
+  @@index([shiftId, date])
+  @@index([rosterWeekId])
+}
+
+model Leave {
+  id         String      @id @default(uuid())
+  employee   Employee    @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId String
+  type       LeaveType
+  startDate  DateTime    @db.Date
+  endDate    DateTime    @db.Date
+  reason     String?
+  status     LeaveStatus @default(PENDING)
+  approvedBy String?
+  approvedAt DateTime?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@index([startDate, endDate])
+}
+
+model Notification {
+  id         String   @id @default(uuid())
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId String
+  title      String
+  message    String
+  type       String   @default("INFO")
+  read       Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([employeeId, read])
+}
