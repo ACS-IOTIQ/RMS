@@ -1,13 +1,25 @@
 'use client';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 import { Sidebar } from '@/components/sidebar';
 import { useAuth } from '@/lib/auth-context';
+import { cn } from '@/lib/utils';
 
 export default function EmployeeLayout({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   const router = useRouter();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem('sidebar-collapsed');
+    if (stored) setSidebarCollapsed(stored === 'true');
+  }, []);
+
+  const updateSidebar = (collapsed: boolean) => {
+    setSidebarCollapsed(collapsed);
+    window.localStorage.setItem('sidebar-collapsed', String(collapsed));
+  };
 
   useEffect(() => {
     if (loading) return;
@@ -21,8 +33,8 @@ export default function EmployeeLayout({ children }: { children: React.ReactNode
 
   return (
     <div className="min-h-screen bg-muted/20">
-      <Sidebar role="EMPLOYEE" />
-      <div className="md:pl-64">{children}</div>
+      <Sidebar role="EMPLOYEE" collapsed={sidebarCollapsed} onCollapsedChange={updateSidebar} />
+      <div className={cn('transition-all duration-200', sidebarCollapsed ? 'md:pl-20' : 'md:pl-64')}>{children}</div>
     </div>
   );
 }

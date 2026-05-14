@@ -24,13 +24,17 @@ class DecisionDto {
 export class LeavesService {
   constructor(private prisma: PrismaService) {}
 
-  list(filters: { status?: LeaveStatus; employeeId?: string }) {
+  list(filters: { status?: LeaveStatus; employeeId?: string; approverEmployeeId?: string }) {
     const where: any = {};
     if (filters.status) where.status = filters.status;
     if (filters.employeeId) where.employeeId = filters.employeeId;
+    if (filters.approverEmployeeId) where.approverEmployeeId = filters.approverEmployeeId;
     return this.prisma.leave.findMany({
       where,
-      include: { employee: { include: { designation: true, location: true } } },
+      include: {
+        employee: { include: { designation: true, location: true, reportingManager: true } },
+        approver: { select: { id: true, name: true, employeeCode: true, email: true } },
+      },
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -38,8 +42,14 @@ export class LeavesService {
   myLeaves(employeeId: string) {
     return this.prisma.leave.findMany({
       where: { employeeId },
+      include: { approver: { select: { id: true, name: true, employeeCode: true, email: true } } },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  approvalQueue(approverEmployeeId: string, status?: LeaveStatus) {
+    if (!approverEmployeeId) return [];
+    return this.list({ approverEmployeeId, status });
   }
 
   async create(dto: LeaveDto, requesterEmployeeId?: string, requesterRole?: UserRole) {
@@ -51,9 +61,18 @@ export class LeavesService {
     const start = parseISO(dto.startDate);
     const end = parseISO(dto.endDate);
     if (end < start) throw new BadRequestException('endDate must be after startDate');
-    return this.prisma.leave.create({
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: empId },
+      select: { id: true, reportingManagerId: true, name: true },
+    });
+    if (!employee) throw new BadRequestException('Employee not found');
+    if (requesterRole !== UserRole.ADMIN && !employee.reportingManagerId) {
+      throw new BadRequestException('Reporting manager is not assigned');
+    }
+    const leave = await this.prisma.leave.create({
       data: {
         employeeId: empId,
+        approverEmployeeId: requesterRole === UserRole.ADMIN ? null : employee.reportingManagerId,
         type: dto.type,
         startDate: start,
         endDate: end,
@@ -61,12 +80,28 @@ export class LeavesService {
         status: requesterRole === UserRole.ADMIN ? LeaveStatus.APPROVED : LeaveStatus.PENDING,
       },
     });
+    if (leave.approverEmployeeId) {
+      await this.prisma.notification.create({
+        data: {
+          employeeId: leave.approverEmployeeId,
+          title: 'Leave approval pending',
+          message: `${employee.name} requested ${dto.type} leave from ${dto.startDate} to ${dto.endDate}.`,
+          type: 'LEAVE_APPROVAL',
+        },
+      });
+    }
+    return leave;
   }
 
-  async decide(id: string, dto: DecisionDto, approverId: string) {
+  async decide(id: string, dto: DecisionDto, approver: any) {
+    const existing = await this.prisma.leave.findUnique({ where: { id }, include: { employee: true } });
+    if (!existing) throw new BadRequestException('Leave request not found');
+    if (approver.role !== UserRole.ADMIN && existing.approverEmployeeId !== approver.employeeId) {
+      throw new ForbiddenException('Only the reporting manager can approve this leave');
+    }
     const leave = await this.prisma.leave.update({
       where: { id },
-      data: { status: dto.status, approvedBy: approverId, approvedAt: new Date() },
+      data: { status: dto.status, approvedBy: approver.userId, approvedAt: new Date() },
     });
     // If approved: cancel impacted roster entries
     if (dto.status === LeaveStatus.APPROVED) {
@@ -78,6 +113,14 @@ export class LeavesService {
         data: { status: 'CANCELLED' },
       });
     }
+    await this.prisma.notification.create({
+      data: {
+        employeeId: leave.employeeId,
+        title: `Leave ${dto.status.toLowerCase()}`,
+        message: `Your ${existing.type} leave request was ${dto.status.toLowerCase()}.`,
+        type: 'LEAVE_DECISION',
+      },
+    });
     return leave;
   }
 
@@ -101,9 +144,15 @@ export class LeavesController {
     @Query('employeeId') employeeId?: string,
   ) {
     if (user.role === UserRole.EMPLOYEE) {
-      return this.svc.myLeaves(user.employeeId);
+      return this.svc.approvalQueue(user.employeeId, status);
     }
     return this.svc.list({ status, employeeId });
+  }
+
+  @Get('approvals')
+  approvals(@CurrentUser() user: any, @Query('status') status?: LeaveStatus) {
+    if (user.role === UserRole.ADMIN) return this.svc.list({ status });
+    return this.svc.approvalQueue(user.employeeId, status);
   }
 
   @Get('my')
@@ -117,9 +166,9 @@ export class LeavesController {
     return this.svc.create(dto, user.employeeId, user.role);
   }
 
-  @Roles(UserRole.ADMIN) @Put(':id/decision')
-  decide(@Param('id') id: string, @Body() dto: DecisionDto, @CurrentUser('userId') userId: string) {
-    return this.svc.decide(id, dto, userId);
+  @Roles(UserRole.ADMIN, UserRole.EMPLOYEE, UserRole.ROSTER_MANAGER, UserRole.PROJECT_MANAGER) @Put(':id/decision')
+  decide(@Param('id') id: string, @Body() dto: DecisionDto, @CurrentUser() user: any) {
+    return this.svc.decide(id, dto, user);
   }
 
   @Delete(':id')

@@ -103,6 +103,12 @@ enum RoundingPolicy {
   MANUAL_FIXED_COUNT
 }
 
+enum CoverageMode {
+  LOCATION_MANDATORY
+  PROJECT_SHARED
+  OPTIONAL_ON_CALL
+}
+
 enum WeekStartDay {
   MONDAY
   TUESDAY
@@ -203,6 +209,8 @@ model Project {
   employees                   Employee[]
   rosterPolicies              RosterPolicy[]
   designationRequirements     DesignationRequirement[]
+  multiLocationRosterPolicies MultiLocationRosterPolicy[]
+  multiLocationCoverageCells  MultiLocationCoverageCell[]
   previousEmployeeAssignments AuditLog[]               @relation("PreviousProject")
   updatedEmployeeAssignments  AuditLog[]               @relation("UpdatedProject")
   createdAt                   DateTime                 @default(now())
@@ -224,6 +232,7 @@ model Location {
   rosterWeeks             RosterWeek[]
   rosterPolicies          RosterPolicy[]
   designationRequirements DesignationRequirement[]
+  multiLocationCoverageCells MultiLocationCoverageCell[]
   createdAt               DateTime                 @default(now())
   updatedAt               DateTime                 @updatedAt
 }
@@ -251,10 +260,10 @@ model Designation {
   name                    String                   @unique
   level                   Int                      @default(1)
   isCritical              Boolean                  @default(false)
-  minStaffing             Int                      @default(1)
   employees               Employee[]
-  shiftRequirements       ShiftRequirement[]
   designationRequirements DesignationRequirement[]
+  multiLocationDesignationPolicies MultiLocationDesignationPolicy[]
+  multiLocationCoverageCells       MultiLocationCoverageCell[]
   createdAt               DateTime                 @default(now())
   updatedAt               DateTime                 @updatedAt
 }
@@ -283,9 +292,14 @@ model Employee {
   project   Project? @relation(fields: [projectId], references: [id])
   projectId String?
 
+  reportingManager   Employee?  @relation("ReportingManager", fields: [reportingManagerId], references: [id], onDelete: SetNull)
+  reportingManagerId String?
+  directReports      Employee[] @relation("ReportingManager")
+
   user              User?
   rosterEntries     RosterEntry[]
   leaves            Leave[]
+  leaveApprovals    Leave[]                 @relation("LeaveApprover")
   notifications     Notification[]
   headedDepartments Department[]            @relation("DepartmentHead")
   weeklyAssignments WeeklyShiftAssignment[]
@@ -298,22 +312,30 @@ model Employee {
 
 model AuditLog {
   id                String   @id @default(uuid())
+  sequence          Int      @unique @default(autoincrement())
   action            String
   entityType        String
   entityId          String
   actorUserId       String?
   actorEmail        String?
+  actorRole         String?
+  method            String?
+  route             String?
   employeeId        String?
   previousProject   Project? @relation("PreviousProject", fields: [previousProjectId], references: [id], onDelete: SetNull)
   previousProjectId String?
   updatedProject    Project? @relation("UpdatedProject", fields: [updatedProjectId], references: [id], onDelete: SetNull)
   updatedProjectId  String?
   metadata          Json?
+  previousHash      String?
+  hash              String?
   createdAt         DateTime @default(now())
 
   @@index([entityType, entityId])
   @@index([employeeId])
   @@index([createdAt])
+  @@index([sequence])
+  @@index([hash])
 }
 
 model Shift {
@@ -327,8 +349,8 @@ model Shift {
   priority                Int                      @default(0)
   location                Location                 @relation(fields: [locationId], references: [id], onDelete: Cascade)
   locationId              String
-  requirements            ShiftRequirement[]
   designationRequirements DesignationRequirement[]
+  multiLocationCoverageCells MultiLocationCoverageCell[]
   rosterEntries           RosterEntry[]
   weeklyAssignments       WeeklyShiftAssignment[]
   replacementAssignments  ReplacementAssignment[]
@@ -364,6 +386,75 @@ model RosterPolicy {
 
   @@index([projectId])
   @@index([locationId])
+}
+
+model MultiLocationRosterPolicy {
+  id                     String         @id @default(uuid())
+  project                Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId              String         @unique
+  requiredDailyHeadcount Int            @default(49)
+  workingDaysPerEmployee Int            @default(6)
+  weeklyOffsPerEmployee  Int            @default(1)
+  shiftDistributionJson  Json           @default("{\"A\":40,\"B\":40,\"C\":20}")
+  roundingPolicy         RoundingPolicy @default(LARGEST_REMAINDER_DESIGNATION_PRIORITY)
+  generalBufferEnabled   Boolean        @default(true)
+  allowExtraDuty         Boolean        @default(true)
+  allowOvertime          Boolean        @default(true)
+  weekStartDay           WeekStartDay   @default(MONDAY)
+  minimumRestHours       Int            @default(12)
+  projectLevel247Enabled Boolean        @default(true)
+  validationSummary      Json?
+  version                Int            @default(1)
+  isActive               Boolean        @default(true)
+  designationPolicies    MultiLocationDesignationPolicy[]
+  coverageCells          MultiLocationCoverageCell[]
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+
+  @@index([projectId])
+  @@index([isActive])
+}
+
+model MultiLocationDesignationPolicy {
+  id            String                    @id @default(uuid())
+  policy        MultiLocationRosterPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  policyId      String
+  designation   Designation               @relation(fields: [designationId], references: [id], onDelete: Cascade)
+  designationId String
+  coverageMode  CoverageMode              @default(PROJECT_SHARED)
+  createdAt     DateTime                  @default(now())
+  updatedAt     DateTime                  @updatedAt
+
+  @@unique([policyId, designationId])
+  @@index([designationId])
+}
+
+model MultiLocationCoverageCell {
+  id               String                    @id @default(uuid())
+  policy           MultiLocationRosterPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  policyId         String
+  project          Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId        String
+  location         Location                  @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  locationId       String
+  shift            Shift                     @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  shiftId          String
+  designation      Designation               @relation(fields: [designationId], references: [id], onDelete: Cascade)
+  designationId    String
+  availableCount   Int                       @default(0)
+  suggestedCount   Int                       @default(0)
+  manualCount      Int?
+  overrideReason   String?
+  shortageSurplus  Int                       @default(0)
+  validationStatus String                    @default("OK")
+  validationMessage String?
+  createdAt        DateTime                  @default(now())
+  updatedAt        DateTime                  @updatedAt
+
+  @@unique([policyId, locationId, shiftId, designationId])
+  @@index([projectId, locationId])
+  @@index([shiftId])
+  @@index([designationId])
 }
 
 model DesignationRequirement {
@@ -530,17 +621,6 @@ model RosterOverride {
   @@index([status])
 }
 
-model ShiftRequirement {
-  id            String      @id @default(uuid())
-  shift         Shift       @relation(fields: [shiftId], references: [id], onDelete: Cascade)
-  shiftId       String
-  designation   Designation @relation(fields: [designationId], references: [id])
-  designationId String
-  minCount      Int         @default(1)
-
-  @@unique([shiftId, designationId])
-}
-
 model RosterEntry {
   id                       String                 @id @default(uuid())
   employee                 Employee               @relation(fields: [employeeId], references: [id], onDelete: Cascade)
@@ -570,20 +650,23 @@ model RosterEntry {
 }
 
 model Leave {
-  id         String      @id @default(uuid())
-  employee   Employee    @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  employeeId String
-  type       LeaveType
-  startDate  DateTime    @db.Date
-  endDate    DateTime    @db.Date
-  reason     String?
-  status     LeaveStatus @default(PENDING)
-  approvedBy String?
-  approvedAt DateTime?
-  createdAt  DateTime    @default(now())
-  updatedAt  DateTime    @updatedAt
+  id                 String      @id @default(uuid())
+  employee           Employee    @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId         String
+  approver           Employee?   @relation("LeaveApprover", fields: [approverEmployeeId], references: [id], onDelete: SetNull)
+  approverEmployeeId String?
+  type               LeaveType
+  startDate          DateTime    @db.Date
+  endDate            DateTime    @db.Date
+  reason             String?
+  status             LeaveStatus @default(PENDING)
+  approvedBy         String?
+  approvedAt         DateTime?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
 
   @@index([startDate, endDate])
+  @@index([approverEmployeeId, status])
 }
 
 model Notification {

@@ -10,13 +10,11 @@ class DesigDto {
   @IsString() @IsNotEmpty() name: string;
   @Type(() => Number) @IsInt() @Min(1) level: number;
   @IsOptional() @IsBoolean() isCritical?: boolean;
-  @IsOptional() @Type(() => Number) @IsInt() @Min(0) minStaffing?: number;
 }
 class UpdateDesigDto {
   @IsOptional() @IsString() name?: string;
   @IsOptional() @Type(() => Number) @IsInt() level?: number;
   @IsOptional() @IsBoolean() isCritical?: boolean;
-  @IsOptional() @Type(() => Number) @IsInt() minStaffing?: number;
 }
 
 @Injectable()
@@ -25,7 +23,6 @@ export class DesignationsService {
   async list(page?: number, pageSize?: number) {
     const include = {
       _count: { select: { employees: true } },
-      shiftRequirements: { include: { shift: { include: { location: true } } } },
     };
     const orderBy = { level: 'asc' as const };
     if (!page && !pageSize) return this.prisma.designation.findMany({ include, orderBy });

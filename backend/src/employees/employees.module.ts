@@ -11,9 +11,12 @@ class EmployeeDto {
   @IsEmail() email: string;
   @IsOptional() @IsString() phone?: string;
   @IsString() @IsNotEmpty() designationId: string;
+  @IsOptional() @IsString() designationName?: string;
   @IsString() @IsNotEmpty() locationId: string;
   @IsString() @IsNotEmpty() projectId: string;
   @IsOptional() @IsString() departmentId?: string;
+  @IsOptional() @IsString() departmentName?: string;
+  @IsOptional() @IsString() reportingManagerId?: string;
   @IsOptional() @IsEnum(EmployeeStatus) status?: EmployeeStatus;
   @IsOptional() @IsEnum(WorkforceCategory) workforceCategory?: WorkforceCategory;
 }
@@ -24,6 +27,7 @@ class UpdateEmployeeDto {
   @IsOptional() @IsString() designationId?: string;
   @IsOptional() @IsString() locationId?: string;
   @IsOptional() @IsString() departmentId?: string;
+  @IsOptional() @IsString() reportingManagerId?: string | null;
   @IsOptional() @IsEnum(EmployeeStatus) status?: EmployeeStatus;
   @IsOptional() @IsEnum(WorkforceCategory) workforceCategory?: WorkforceCategory;
 }
@@ -58,7 +62,14 @@ export class EmployeesService {
     }
     const query = {
       where,
-      include: { designation: true, location: true, project: true, department: true },
+      include: {
+        designation: true,
+        location: true,
+        project: true,
+        department: true,
+        reportingManager: { select: { id: true, name: true, employeeCode: true, email: true } },
+        user: { select: { id: true, email: true, role: true } },
+      },
       orderBy: { createdAt: 'desc' as const },
     };
 
@@ -85,6 +96,9 @@ export class EmployeesService {
       where: { id },
       include: {
         designation: true, location: true, project: true, department: true,
+        reportingManager: { select: { id: true, name: true, employeeCode: true, email: true } },
+        directReports: { select: { id: true, name: true, employeeCode: true, email: true } },
+        user: { select: { id: true, email: true, role: true } },
         rosterEntries: { take: 30, orderBy: { date: 'desc' }, include: { shift: true } },
         leaves: { take: 10, orderBy: { createdAt: 'desc' } },
       },
@@ -93,14 +107,14 @@ export class EmployeesService {
 
   async create(data: EmployeeDto) {
     try {
-      return await this.prisma.employee.create({ data });
+      return await this.prisma.employee.create({ data: this.cleanData(data) });
     } catch (e: any) {
       if (e.code === 'P2002') throw new BadRequestException('Employee code or email already exists');
       throw e;
     }
   }
 
-  async bulkCreate(rows: EmployeeDto[]) {
+  async bulkCreate(rows: any[]) {
     const errors: { row: number; message: string }[] = [];
     let created = 0;
     for (let i = 0; i < rows.length; i++) {
@@ -108,9 +122,10 @@ export class EmployeesService {
       try {
         const payload: any = { ...row };
         if (!payload.phone) delete payload.phone;
-        if (!payload.departmentId) delete payload.departmentId;
+        if (!payload.reportingManagerId) delete payload.reportingManagerId;
         if (!payload.status) delete payload.status;
-        await this.prisma.employee.create({ data: payload });
+        const data = await this.prepareBulkPayload(payload);
+        await this.prisma.employee.create({ data });
         created += 1;
       } catch (e: any) {
         const message = e.code === 'P2002'
@@ -123,7 +138,8 @@ export class EmployeesService {
   }
 
   update(id: string, data: UpdateEmployeeDto) {
-    return this.prisma.employee.update({ where: { id }, data });
+    if (data.reportingManagerId && data.reportingManagerId === id) throw new BadRequestException('Employee cannot report to themselves');
+    return this.prisma.employee.update({ where: { id }, data: this.cleanData(data) });
   }
 
   async updateAssignment(id: string, dto: AssignmentDto, actor: any) {
@@ -179,6 +195,53 @@ export class EmployeesService {
       locationId: dto.locationId ?? null,
       departmentId: dto.departmentId ?? null,
     };
+  }
+
+  private cleanData<T extends Record<string, any>>(data: T) {
+    const payload: any = { ...data };
+    for (const key of ['departmentId', 'reportingManagerId', 'locationId', 'projectId']) {
+      if (payload[key] === '') payload[key] = null;
+    }
+    return payload;
+  }
+
+  private async prepareBulkPayload(row: Record<string, any>) {
+    const payload = this.cleanData(row);
+    const designationName = String(payload.designationName ?? '').trim();
+    const departmentName = String(payload.departmentName ?? '').trim();
+    delete payload.designationName;
+    delete payload.departmentName;
+
+    if (!payload.designationId) {
+      if (!designationName) throw new BadRequestException('Designation is required');
+      const existing = await this.prisma.designation.findFirst({
+        where: { name: { equals: designationName, mode: 'insensitive' } },
+      });
+      const designation = existing ?? await this.prisma.designation.create({
+        data: { name: designationName, level: 1 },
+      });
+      payload.designationId = designation.id;
+    }
+
+    if (!payload.departmentId && departmentName && payload.projectId) {
+      const existing = await this.prisma.department.findFirst({
+        where: {
+          projectId: payload.projectId,
+          name: { equals: departmentName, mode: 'insensitive' },
+        },
+      });
+      const department = existing ?? await this.prisma.department.create({
+        data: {
+          name: departmentName,
+          projectId: payload.projectId,
+          locationId: payload.locationId ?? null,
+        },
+      });
+      payload.departmentId = department.id;
+    }
+
+    if (!payload.departmentId) delete payload.departmentId;
+    return payload;
   }
 
   remove(id: string) {

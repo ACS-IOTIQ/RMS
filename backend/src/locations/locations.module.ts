@@ -67,7 +67,7 @@ export class LocationsService {
       where: { id },
       include: {
         project: true,
-        shifts: { include: { requirements: { include: { designation: true } } } },
+        shifts: true,
         departments: { include: { headEmployee: true, _count: { select: { employees: true } } } },
         employees: { include: { designation: true, department: true } },
       },
@@ -83,7 +83,7 @@ export class LocationsService {
   }) {
     const location = await this.prisma.location.findUnique({
       where: { id: locationId },
-      include: { shifts: { include: { requirements: true } } },
+      include: { shifts: true },
     });
     if (!location) throw new BadRequestException('Location not found');
 
@@ -93,13 +93,21 @@ export class LocationsService {
     } else {
       where.OR = [{ locationId: null }, { locationId: { not: locationId } }];
     }
-    if (filters.designationId) where.designationId = filters.designationId;
     if (filters.departmentId) where.departmentId = filters.departmentId;
     if (filters.status) where.status = filters.status;
+    if (filters.designationId) where.designationId = filters.designationId;
     if (filters.shiftId) {
       const shift = location.shifts.find((s) => s.id === filters.shiftId);
-      const eligibleDesignationIds = shift?.requirements.map((r) => r.designationId) ?? [];
-      where.designationId = { in: eligibleDesignationIds };
+      if (!shift) throw new BadRequestException('Shift does not belong to this location');
+      const requirements = await this.prisma.designationRequirement.findMany({
+        where: { locationId, shiftId: filters.shiftId, isActive: true },
+        select: { designationId: true },
+      });
+      const eligibleDesignationIds = requirements.map((r) => r.designationId);
+      if (eligibleDesignationIds.length > 0) {
+        if (filters.designationId && !eligibleDesignationIds.includes(filters.designationId)) return [];
+        where.designationId = filters.designationId ?? { in: eligibleDesignationIds };
+      }
     }
     if (filters.search) {
       where.AND = [

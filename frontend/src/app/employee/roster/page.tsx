@@ -19,19 +19,40 @@ import {
 } from 'date-fns';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 
-const codeColor: Record<string, string> = {
-  A: 'bg-blue-100 text-blue-700 border-blue-200',
-  B: 'bg-violet-100 text-violet-700 border-violet-200',
-  C: 'bg-slate-200 text-slate-800 border-slate-300',
-  G: 'bg-emerald-100 text-emerald-700 border-emerald-200',
-  F: 'bg-amber-100 text-amber-700 border-amber-200',
+const shiftTone: Record<string, string> = {
+  A: 'border-blue-300 bg-blue-100 text-blue-800',
+  B: 'border-amber-300 bg-amber-100 text-amber-900',
+  C: 'border-indigo-300 bg-indigo-100 text-indigo-900',
+  G: 'border-emerald-300 bg-emerald-100 text-emerald-800',
+  F: 'border-rose-300 bg-rose-100 text-rose-800',
 };
+
+const shiftNames: Record<string, string> = {
+  A: 'Morning',
+  B: 'Afternoon',
+  C: 'Night',
+  G: 'General',
+  F: 'Flexible',
+};
+
+const shiftLegend = [
+  { code: 'A', label: 'Morning' },
+  { code: 'B', label: 'Afternoon' },
+  { code: 'C', label: 'Night' },
+  { code: 'G', label: 'General' },
+  { code: 'F', label: 'Flexible' },
+];
+
+function shiftLabel(shift: any) {
+  if (!shift) return 'Shift';
+  return shiftNames[shift.code] ?? shift.name ?? shift.code ?? 'Shift';
+}
 
 function entryLabel(entry: any) {
   if (entry.status === 'ON_LEAVE') return 'Leave';
   if (entry.status === 'WEEKLY_OFF') return 'Off';
-  if (entry.isReplacement) return `${entry.shift.code} cover`;
-  return `${entry.shift.code} ${entry.shift.startTime}`;
+  if (entry.isReplacement) return `${shiftLabel(entry.shift)} cover`;
+  return shiftLabel(entry.shift);
 }
 
 export default function MyRosterPage() {
@@ -95,7 +116,7 @@ export default function MyRosterPage() {
                       {dayEntries.map((entry) => (
                         <div
                           key={entry.id}
-                          className={`inline-flex max-w-full items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-semibold ${entry.status === 'ON_LEAVE' ? 'bg-rose-50 text-rose-700 border-rose-200' : entry.status === 'WEEKLY_OFF' ? 'bg-slate-100 text-slate-700 border-slate-200' : codeColor[entry.shift.code] ?? 'bg-muted'}`}
+                          className={`inline-flex max-w-full items-center justify-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-semibold ${entry.isReplacement ? 'ring-1 ring-offset-1 ring-current' : ''} ${entry.status === 'ON_LEAVE' ? 'bg-rose-50 text-rose-700 border-rose-200' : entry.status === 'WEEKLY_OFF' ? 'bg-slate-100 text-slate-700 border-slate-200' : shiftTone[entry.shift?.code] ?? 'bg-muted'}`}
                         >
                           {entryLabel(entry)}
                         </div>
@@ -107,12 +128,9 @@ export default function MyRosterPage() {
             </div>
 
             <div className="mt-6 flex flex-wrap gap-3 text-xs">
-              {Object.entries(codeColor).map(([code, cls]) => (
+              {shiftLegend.map(({ code, label }) => (
                 <div key={code} className="flex items-center gap-2">
-                  <span className={`inline-flex items-center justify-center h-5 w-5 rounded font-semibold border ${cls}`}>{code}</span>
-                  <span className="text-muted-foreground">
-                    {code === 'A' ? 'Morning' : code === 'B' ? 'Evening' : code === 'C' ? 'Night' : code === 'G' ? 'General' : 'Flexible'}
-                  </span>
+                  <span className={`inline-flex min-w-20 items-center justify-center rounded border px-2 py-1 font-semibold ${shiftTone[code]}`}>{label}</span>
                 </div>
               ))}
               <Badge variant="destructive">Leave</Badge>

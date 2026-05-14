@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, FileText } from 'lucide-react';
+import { Check, Plus, Trash2, FileText, X } from 'lucide-react';
 import { Topbar } from '@/components/topbar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -19,11 +19,19 @@ const statusVariant: Record<string, any> = { PENDING: 'warning', APPROVED: 'succ
 
 export default function MyLeavesPage() {
   const [items, setItems] = useState<any[]>([]);
+  const [approvals, setApprovals] = useState<any[]>([]);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ type: 'CASUAL', startDate: '', endDate: '', reason: '' });
   const { toast } = useToast();
 
-  const load = async () => setItems(await api.get('/leaves/my'));
+  const load = async () => {
+    const [mine, approvalRows] = await Promise.all([
+      api.get('/leaves/my'),
+      api.get('/leaves/approvals?status=PENDING'),
+    ]);
+    setItems(mine);
+    setApprovals(approvalRows);
+  };
   useEffect(() => { load(); }, []);
 
   const onSubmit = async (e: React.FormEvent) => {
@@ -39,6 +47,14 @@ export default function MyLeavesPage() {
   const onCancel = async (id: string) => {
     if (!confirm('Cancel this pending leave?')) return;
     try { await api.del(`/leaves/${id}`); toast('Cancelled', 'success'); load(); } catch (e: any) { toast(e.message, 'error'); }
+  };
+
+  const decide = async (id: string, status: 'APPROVED' | 'REJECTED') => {
+    try {
+      await api.put(`/leaves/${id}/decision`, { status });
+      toast(`Leave ${status.toLowerCase()}`, 'success');
+      load();
+    } catch (e: any) { toast(e.message, 'error'); }
   };
 
   return (
@@ -91,6 +107,33 @@ export default function MyLeavesPage() {
             </TableBody>
           </Table>
         </CardContent></Card>
+
+        {approvals.length > 0 && (
+          <Card><CardContent className="p-0">
+            <div className="border-b p-3 text-sm font-medium">Pending Team Approvals</div>
+            <Table>
+              <TableHeader><TableRow><TableHead>Employee</TableHead><TableHead>Type</TableHead><TableHead>From</TableHead><TableHead>To</TableHead><TableHead>Reason</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {approvals.map((l) => (
+                  <TableRow key={l.id}>
+                    <TableCell>
+                      <div className="font-medium">{l.employee?.name}</div>
+                      <div className="text-xs text-muted-foreground">{l.employee?.employeeCode}</div>
+                    </TableCell>
+                    <TableCell><Badge variant="outline">{l.type}</Badge></TableCell>
+                    <TableCell>{formatDate(l.startDate)}</TableCell>
+                    <TableCell>{formatDate(l.endDate)}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground max-w-xs truncate">{l.reason || '-'}</TableCell>
+                    <TableCell className="text-right">
+                      <Button size="sm" variant="ghost" onClick={() => decide(l.id, 'APPROVED')} className="text-emerald-600 hover:text-emerald-700"><Check className="h-4 w-4 mr-1" />Approve</Button>
+                      <Button size="sm" variant="ghost" onClick={() => decide(l.id, 'REJECTED')} className="text-destructive"><X className="h-4 w-4 mr-1" />Reject</Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent></Card>
+        )}
       </main>
     </>
   );

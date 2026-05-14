@@ -1,10 +1,11 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { Building2, MoreVertical, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Building2, MoreVertical, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { Topbar } from '@/components/topbar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
 import { Card, CardContent } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
@@ -16,6 +17,7 @@ import {
 import { PaginationControls, PaginationMeta } from '@/components/ui/pagination';
 import { api } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
+import { SortDir, filterByQuery, sortRows } from '@/lib/table-tools';
 
 const emptyForm = { name: '' };
 const emptyMeta: PaginationMeta = { page: 1, pageSize: 10, total: 0, totalPages: 1 };
@@ -25,6 +27,9 @@ export default function OrganizationsPage() {
   const [meta, setMeta] = useState<PaginationMeta>(emptyMeta);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const [search, setSearch] = useState('');
+  const [sortKey, setSortKey] = useState('name');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [open, setOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [editing, setEditing] = useState<any>(null);
@@ -39,6 +44,7 @@ export default function OrganizationsPage() {
   };
 
   useEffect(() => { load(); }, [page, pageSize]);
+  const visibleItems = sortRows(filterByQuery(items, search, ['name', 'code']), sortKey, sortDir);
 
   const dirty = form.name !== initialForm.name;
 
@@ -88,7 +94,19 @@ export default function OrganizationsPage() {
     <>
       <Topbar title="Organizations" subtitle="Top-level business entities" />
       <main className="p-4 md:p-6 space-y-4">
-        <div className="flex justify-end">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-1 flex-wrap gap-2">
+            <div className="relative min-w-56 flex-1">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input className="pl-9" placeholder="Search organizations..." value={search} onChange={(e) => setSearch(e.target.value)} />
+            </div>
+            <Select value={`${sortKey}:${sortDir}`} onChange={(e) => { const [key, dir] = e.target.value.split(':'); setSortKey(key); setSortDir(dir as SortDir); }} className="w-48">
+              <option value="name:asc">Name A-Z</option>
+              <option value="name:desc">Name Z-A</option>
+              <option value="code:asc">Code A-Z</option>
+              <option value="_count.projects:desc">Projects high-low</option>
+            </Select>
+          </div>
           <Dialog open={open} onOpenChange={(next) => next ? setOpen(true) : requestClose()}>
             <DialogTrigger asChild><Button onClick={openNew}><Plus className="h-4 w-4 mr-1.5" />Add Organization</Button></DialogTrigger>
             <DialogContent
@@ -123,8 +141,8 @@ export default function OrganizationsPage() {
           <Table>
             <TableHeader><TableRow><TableHead>Organization</TableHead><TableHead>Code</TableHead><TableHead>Projects</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
             <TableBody>
-              {items.length === 0 && <TableRow><TableCell colSpan={4} className="text-center py-10 text-muted-foreground">No organizations yet.</TableCell></TableRow>}
-              {items.map((org) => (
+              {visibleItems.length === 0 && <TableRow><TableCell colSpan={4} className="text-center py-10 text-muted-foreground">No organizations yet.</TableCell></TableRow>}
+              {visibleItems.map((org) => (
                 <TableRow key={org.id}>
                   <TableCell><div className="flex items-center gap-2"><div className="h-8 w-8 rounded-md bg-primary/10 text-primary flex items-center justify-center"><Building2 className="h-4 w-4" /></div><span className="font-medium">{org.name}</span></div></TableCell>
                   <TableCell className="font-mono text-xs">{org.code}</TableCell>

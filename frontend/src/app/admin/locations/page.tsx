@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Eye, MapPin, MoreVertical, Pencil, Settings2, Trash2, Users } from 'lucide-react';
+import { Eye, MapPin, MoreVertical, Pencil, Search, Settings2, Trash2, Users } from 'lucide-react';
 import { Topbar } from '@/components/topbar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -19,6 +19,7 @@ import {
 import { PaginationControls, PaginationMeta } from '@/components/ui/pagination';
 import { api } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
+import { SortDir, filterByQuery, sortRows } from '@/lib/table-tools';
 
 const emptyForm = { name: '', projectId: '', timezone: 'Asia/Kolkata', capacity: 100, weeklyOffPolicy: 'ROTATING', fixedWeeklyOffDay: 0 };
 const emptyMeta: PaginationMeta = { page: 1, pageSize: 10, total: 0, totalPages: 1 };
@@ -41,6 +42,10 @@ export default function LocationsPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [meta, setMeta] = useState<PaginationMeta>(emptyMeta);
+  const [search, setSearch] = useState('');
+  const [projectFilter, setProjectFilter] = useState('');
+  const [sortKey, setSortKey] = useState('name');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [assignmentTab, setAssignmentTab] = useState<'assigned' | 'unassigned'>('assigned');
   const [candidateSearch, setCandidateSearch] = useState('');
   const [candidateDesignation, setCandidateDesignation] = useState('');
@@ -69,6 +74,10 @@ export default function LocationsPage() {
   useEffect(() => { load(); }, [page, pageSize]);
 
   const dirty = JSON.stringify(form) !== JSON.stringify(initialForm);
+  const visibleItems = useMemo(() => {
+    const scoped = projectFilter ? items.filter((location) => location.projectId === projectFilter) : items;
+    return sortRows(filterByQuery(scoped, search, ['name', 'project.name', 'timezone']), sortKey, sortDir);
+  }, [items, projectFilter, search, sortKey, sortDir]);
 
   const openNew = () => {
     const next = { ...emptyForm, projectId: projects[0]?.id ?? '' };
@@ -196,7 +205,24 @@ export default function LocationsPage() {
     <>
       <Topbar title="Locations" subtitle="Operational sites, workforce, and shift applicability" />
       <main className="p-4 md:p-6 space-y-4">
-        <div className="flex justify-end">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-1 flex-wrap gap-2">
+            <div className="relative min-w-56 flex-1">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input className="pl-9" placeholder="Search locations..." value={search} onChange={(e) => setSearch(e.target.value)} />
+            </div>
+            <Select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)} className="w-52">
+              <option value="">All projects</option>
+              {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </Select>
+            <Select value={`${sortKey}:${sortDir}`} onChange={(e) => { const [key, dir] = e.target.value.split(':'); setSortKey(key); setSortDir(dir as SortDir); }} className="w-48">
+              <option value="name:asc">Name A-Z</option>
+              <option value="name:desc">Name Z-A</option>
+              <option value="capacity:desc">Capacity high-low</option>
+              <option value="_count.employees:desc">Employees high-low</option>
+              <option value="_count.shifts:desc">Shifts high-low</option>
+            </Select>
+          </div>
           <Dialog open={open} onOpenChange={(next) => next ? setOpen(true) : requestClose()}>
             <DialogTrigger asChild><Button onClick={openNew}><MapPin className="h-4 w-4 mr-1.5" />Add Location</Button></DialogTrigger>
             <DialogContent onInteractOutside={(e) => e.preventDefault()} onEscapeKeyDown={(e) => e.preventDefault()}>
@@ -215,24 +241,6 @@ export default function LocationsPage() {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1.5"><Label>Timezone</Label><Input value={form.timezone} onChange={(e) => setForm({ ...form, timezone: e.target.value })} /></div>
                   <div className="space-y-1.5"><Label>Capacity</Label><Input type="number" min={1} value={form.capacity} onChange={(e) => setForm({ ...form, capacity: Number(e.target.value) })} /></div>
-                  <div className="space-y-1.5"><Label>Weekly Off Policy</Label>
-                    <Select value={form.weeklyOffPolicy} onChange={(e) => setForm({ ...form, weeklyOffPolicy: e.target.value })}>
-                      <option value="ROTATING">Rotating</option>
-                      <option value="FIXED">Fixed</option>
-                      <option value="NONE">None</option>
-                    </Select>
-                  </div>
-                  <div className="space-y-1.5"><Label>Fixed Off Day</Label>
-                    <Select value={String(form.fixedWeeklyOffDay)} disabled={form.weeklyOffPolicy !== 'FIXED'} onChange={(e) => setForm({ ...form, fixedWeeklyOffDay: Number(e.target.value) })}>
-                      <option value="1">Monday</option>
-                      <option value="2">Tuesday</option>
-                      <option value="3">Wednesday</option>
-                      <option value="4">Thursday</option>
-                      <option value="5">Friday</option>
-                      <option value="6">Saturday</option>
-                      <option value="0">Sunday</option>
-                    </Select>
-                  </div>
                 </div>
                 <DialogFooter><Button type="button" variant="outline" onClick={requestClose}>Cancel</Button><Button type="submit">Save</Button></DialogFooter>
               </form>
@@ -242,16 +250,15 @@ export default function LocationsPage() {
 
         <Card><CardContent className="p-0">
           <Table>
-            <TableHeader><TableRow><TableHead>Location</TableHead><TableHead>Project</TableHead><TableHead>Timezone</TableHead><TableHead>Capacity</TableHead><TableHead>Weekly Off</TableHead><TableHead>Employees</TableHead><TableHead>Shifts</TableHead><TableHead>Departments</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>Location</TableHead><TableHead>Project</TableHead><TableHead>Timezone</TableHead><TableHead>Capacity</TableHead><TableHead>Employees</TableHead><TableHead>Shifts</TableHead><TableHead>Departments</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
             <TableBody>
-              {items.length === 0 && <TableRow><TableCell colSpan={9} className="text-center py-10 text-muted-foreground">No locations yet.</TableCell></TableRow>}
-              {items.map((location) => (
+              {visibleItems.length === 0 && <TableRow><TableCell colSpan={8} className="text-center py-10 text-muted-foreground">No locations yet.</TableCell></TableRow>}
+              {visibleItems.map((location) => (
                 <TableRow key={location.id}>
                   <TableCell><div className="flex items-center gap-2"><div className="h-8 w-8 rounded-md bg-emerald-500/10 text-emerald-600 flex items-center justify-center"><MapPin className="h-4 w-4" /></div><span className="font-medium">{location.name}</span></div></TableCell>
                   <TableCell>{location.project?.name}</TableCell>
                   <TableCell className="text-muted-foreground text-xs">{location.timezone}</TableCell>
                   <TableCell>{location.capacity}</TableCell>
-                  <TableCell><Badge variant="outline">{location.weeklyOffPolicy ?? 'ROTATING'}</Badge></TableCell>
                   <TableCell>{location._count?.employees ?? 0}</TableCell>
                   <TableCell>{location._count?.shifts ?? 0}</TableCell>
                   <TableCell>{location._count?.departments ?? 0}</TableCell>
@@ -265,7 +272,7 @@ export default function LocationsPage() {
                         <DropdownMenuItem onClick={() => openWorkforce(location)}><Users className="h-4 w-4 mr-2" />View Workforce</DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem onClick={() => router.push(`/admin/shifts?locationId=${location.id}`)}><Settings2 className="h-4 w-4 mr-2" />Configure Shifts</DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => router.push('/admin/designations')}><Settings2 className="h-4 w-4 mr-2" />Configure Designations</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => router.push('/admin/designations')}><Settings2 className="h-4 w-4 mr-2" />Manage Designations</DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem className="text-destructive" onClick={() => onDelete(location.id)}><Trash2 className="h-4 w-4 mr-2" />Delete</DropdownMenuItem>
                       </DropdownMenuContent>
@@ -299,7 +306,6 @@ export default function LocationsPage() {
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Project</div><div className="font-medium">{selectedDetails.project?.name}</div></div>
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Timezone</div><div className="font-medium">{selectedDetails.timezone}</div></div>
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Capacity</div><div className="font-medium">{selectedDetails.capacity}</div></div>
-                <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Weekly Off</div><div className="font-medium">{selectedDetails.weeklyOffPolicy ?? 'ROTATING'}</div></div>
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Employees</div><div className="font-medium">{selectedDetails.employees?.length ?? 0}</div></div>
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Departments</div><div className="font-medium">{selectedDetails.departments?.length ?? 0}</div></div>
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">Shifts</div><div className="font-medium">{selectedDetails.shifts?.length ?? 0}</div></div>

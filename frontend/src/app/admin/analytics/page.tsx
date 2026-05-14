@@ -16,6 +16,7 @@ import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { api, apiBlob } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
+import { SortDir, sortRows } from '@/lib/table-tools';
 
 const colors = ['#2563eb', '#7c3aed', '#0891b2', '#059669', '#d97706', '#dc2626', '#be185d'];
 const views = ['Shift Coverage Trend', 'Designation Coverage', 'Weekly Off Distribution', 'Leave Impact', 'Replacement Workload', 'Fairness Score', 'Night Shift Burden', 'Validation Issues'];
@@ -205,15 +206,26 @@ function ChartCard({ title, description, children }: any) {
 }
 
 function RowsTable({ title, rows, columns }: { title: string; rows: any[]; columns: string[] }) {
+  const [sortKey, setSortKey] = useState(columns[0] ?? '');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
+  const visibleRows = sortKey ? sortRows(rows ?? [], sortKey, sortDir) : (rows ?? []);
   return (
     <Card>
-      <CardHeader><CardTitle className="text-base">{title}</CardTitle></CardHeader>
+      <CardHeader>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <CardTitle className="text-base">{title}</CardTitle>
+          <Select value={`${sortKey}:${sortDir}`} onChange={(e) => { const [key, dir] = e.target.value.split(':'); setSortKey(key); setSortDir(dir as SortDir); }} className="w-52">
+            {columns.map((column) => <option key={`${column}-asc`} value={`${column}:asc`}>{column} A-Z</option>)}
+            {columns.map((column) => <option key={`${column}-desc`} value={`${column}:desc`}>{column} Z-A</option>)}
+          </Select>
+        </div>
+      </CardHeader>
       <CardContent className="overflow-auto">
         <Table>
           <TableHeader><TableRow>{columns.map((column) => <TableHead key={column}>{column}</TableHead>)}</TableRow></TableHeader>
           <TableBody>
-            {!rows?.length && <TableRow><TableCell colSpan={columns.length} className="py-8 text-center text-muted-foreground">No data</TableCell></TableRow>}
-            {(rows ?? []).map((row, index) => (
+            {!visibleRows?.length && <TableRow><TableCell colSpan={columns.length} className="py-8 text-center text-muted-foreground">No data</TableCell></TableRow>}
+            {visibleRows.map((row, index) => (
               <TableRow key={index}>{columns.map((column) => <TableCell key={column}>{String(row[column] ?? '')}</TableCell>)}</TableRow>
             ))}
           </TableBody>

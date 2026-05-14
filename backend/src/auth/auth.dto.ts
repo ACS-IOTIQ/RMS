@@ -21,3 +21,19 @@ export class RegisterDto {
   @IsString()
   employeeCode?: string;
 }
+
+export class ChangePasswordDto {
+  @IsString()
+  @MinLength(6)
+  currentPassword: string;
+
+  @IsString()
+  @MinLength(6)
+  newPassword: string;
+}
+
+export class AdminResetPasswordDto {
+  @IsString()
+  @MinLength(6)
+  newPassword: string;
+}

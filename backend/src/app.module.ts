@@ -13,6 +13,7 @@ import { RosterPoliciesModule } from './roster-policies/roster-policies.module';
 import { RostersModule } from './rosters/rosters.module';
 import { LeavesModule } from './leaves/leaves.module';
 import { AnalyticsModule } from './analytics/analytics.module';
+import { AuditModule } from './audit/audit.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
     RostersModule,
     LeavesModule,
     AnalyticsModule,
+    AuditModule,
   ],
 })
 export class AppModule {}

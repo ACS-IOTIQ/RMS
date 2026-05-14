@@ -367,7 +367,7 @@ export class RostersService {
       include: {
         location: { include: { project: true } },
         weeklyAssignments: {
-          include: { employee: { include: { designation: true, department: true } }, shift: { include: { requirements: { include: { designation: true } } } } },
+          include: { employee: { include: { designation: true, department: true } }, shift: true },
           orderBy: [{ shift: { code: 'asc' } }, { employee: { name: 'asc' } }],
         },
         replacementAssignments: {
@@ -418,7 +418,7 @@ export class RostersService {
       include: {
         snapshot: true,
         location: true,
-        weeklyAssignments: { include: { employee: { include: { designation: true, department: true } }, shift: { include: { requirements: { include: { designation: true } } } } } },
+        weeklyAssignments: { include: { employee: { include: { designation: true, department: true } }, shift: true } },
         replacementAssignments: true,
         overrides: true,
       },
@@ -516,7 +516,7 @@ export class RostersService {
       });
       if (entries.length > 0) await tx.rosterEntry.createMany({ data: entries as any, skipDuplicates: true });
       await tx.replacementAssignment.updateMany({
-        where: { rosterWeekId: rosterWeek.id, status: ReplacementStatus.SUGGESTED },
+        where: { rosterWeekId: rosterWeek.id, status: ReplacementStatus.SUGGESTED, overtimeFlag: false },
         data: { status: ReplacementStatus.APPROVED },
       });
       await tx.rosterWeek.update({
@@ -683,7 +683,7 @@ export class RostersService {
   }
 
   async myRoster(employeeId: string, from?: string, to?: string) {
-    const where: any = { employeeId };
+    const where: any = { employeeId, rosterWeek: { status: RosterWeekStatus.PUBLISHED } };
     if (from) where.date = { ...(where.date ?? {}), gte: parseISO(from) };
     if (to) where.date = { ...(where.date ?? {}), lte: parseISO(to) };
     const entries = await this.prisma.rosterEntry.findMany({
@@ -699,7 +699,12 @@ export class RostersService {
       },
       orderBy: { date: 'asc' },
     });
-    const replacementWhere: any = { replacementEmployeeId: employeeId };
+    const replacementWhere: any = {
+      replacementEmployeeId: employeeId,
+      rosterWeek: { status: RosterWeekStatus.PUBLISHED },
+      status: ReplacementStatus.APPROVED,
+      overtimeFlag: false,
+    };
     if (from || to) {
       replacementWhere.date = {};
       if (from) replacementWhere.date.gte = parseISO(from);
@@ -747,15 +752,18 @@ export class RostersService {
 
   async coverage(locationId: string, date: string) {
     const day = startOfDay(parseISO(date));
+    const location = await this.prisma.location.findUnique({ where: { id: locationId }, select: { projectId: true } });
+    if (!location) throw new BadRequestException('Location not found');
     const entries = await this.prisma.rosterEntry.findMany({
       where: { date: day, shift: { locationId }, status: RosterStatus.SCHEDULED },
-      include: { shift: { include: { requirements: { include: { designation: true } } } }, employee: { include: { designation: true } } },
+      include: { shift: true, employee: { include: { designation: true } } },
     });
-    const shifts = await this.prisma.shift.findMany({
+    const rawShifts = await this.prisma.shift.findMany({
       where: { locationId },
-      include: { requirements: { include: { designation: true } } },
       orderBy: [{ priority: 'desc' }, { code: 'asc' }],
     });
+    const requirements = await this.loadDesignationRequirements(location.projectId, locationId, day);
+    const shifts = this.applyDesignationRequirements(rawShifts, requirements);
     return shifts.map((shift) => {
       const assigned = entries.filter((e) => e.shiftId === shift.id);
       const byDesig = shift.requirements.map((r) => {
@@ -844,8 +852,7 @@ export class RostersService {
     });
   }
 
-  private applyDesignationRequirements(shifts: ShiftRule[], requirements: any[]) {
-    if (!requirements.length) return shifts;
+  private applyDesignationRequirements(shifts: (Omit<ShiftRule, 'requirements'> & { requirements?: ShiftRule['requirements'] })[], requirements: any[]) {
     const byShift = requirements.reduce((acc: Record<string, any[]>, req) => {
       if (req.dayType !== DayType.ANY) return acc;
       acc[req.shiftId] ??= [];
@@ -853,8 +860,7 @@ export class RostersService {
       return acc;
     }, {});
     return shifts.map((shift) => {
-      const configured = byShift[shift.id];
-      if (!configured?.length) return shift;
+      const configured = byShift[shift.id] ?? [];
       return {
         ...shift,
         requirements: configured.map((req) => ({
@@ -877,7 +883,6 @@ export class RostersService {
       include: {
         project: true,
         shifts: {
-          include: { requirements: { include: { designation: true } } },
           orderBy: [{ priority: 'desc' }, { code: 'asc' }],
         },
         employees: { include: { designation: true, department: true } },
@@ -1183,7 +1188,7 @@ export class RostersService {
           severity: 'CRITICAL',
           code: 'NO_SHIFT_ELIGIBILITY',
           message: `${employee.name} cannot be assigned because no configured shift allows ${employee.designation.name}.`,
-          recommendation: 'Configure shift designation eligibility or update the employee designation.',
+          recommendation: 'Configure designation requirements in roster policy or update the employee designation.',
           designationId: employee.designationId,
           designationName: employee.designation.name,
         });

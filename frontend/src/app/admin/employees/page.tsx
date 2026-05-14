@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import {
-  CheckCircle2, Download, Eye, History, MoreVertical, Pencil, Search, Trash2, Upload, UserMinus, UserPlus,
+  CheckCircle2, Download, Eye, History, KeyRound, MoreVertical, Pencil, Search, Trash2, Upload, UserMinus, UserPlus,
 } from 'lucide-react';
 import { Topbar } from '@/components/topbar';
 import { Button } from '@/components/ui/button';
@@ -21,6 +21,7 @@ import { PaginationControls, PaginationMeta } from '@/components/ui/pagination';
 import { api } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
 import { formatDate } from '@/lib/utils';
+import { SortDir, sortRows } from '@/lib/table-tools';
 
 const statusVariant: Record<string, any> = {
   ACTIVE: 'success', ON_LEAVE: 'warning', RESIGNED: 'destructive',
@@ -30,6 +31,7 @@ const statusVariant: Record<string, any> = {
 const emptyForm = {
   employeeCode: '', name: '', email: '', phone: '',
   designationId: '', locationId: '', projectId: '', departmentId: '',
+  reportingManagerId: '',
   workforceCategory: 'PRIMARY',
 };
 
@@ -57,8 +59,14 @@ export default function EmployeesPage() {
   const [departments, setDepartments] = useState<any[]>([]);
   const [allDepartments, setAllDepartments] = useState<any[]>([]);
   const [assignmentDepartments, setAssignmentDepartments] = useState<any[]>([]);
+  const [managers, setManagers] = useState<any[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [projectFilter, setProjectFilter] = useState('');
+  const [locationFilter, setLocationFilter] = useState('');
+  const [designationFilter, setDesignationFilter] = useState('');
+  const [sortKey, setSortKey] = useState('name');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [open, setOpen] = useState(false);
@@ -67,6 +75,7 @@ export default function EmployeesPage() {
   const [viewOpen, setViewOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [assignmentOpen, setAssignmentOpen] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
   const [editing, setEditing] = useState<any>(null);
   const [selected, setSelected] = useState<any>(null);
   const [details, setDetails] = useState<any>(null);
@@ -76,6 +85,7 @@ export default function EmployeesPage() {
   const [bulkErrors, setBulkErrors] = useState<string[]>([]);
   const [bulkFileName, setBulkFileName] = useState('');
   const [bulkValidated, setBulkValidated] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
   const { toast } = useToast();
 
   const load = async () => {
@@ -84,6 +94,9 @@ export default function EmployeesPage() {
     params.set('pageSize', String(pageSize));
     if (search) params.set('q', search);
     if (statusFilter) params.set('status', statusFilter);
+    if (projectFilter) params.set('projectId', projectFilter);
+    if (locationFilter) params.set('locationId', locationFilter);
+    if (designationFilter) params.set('designationId', designationFilter);
     const data = await api.get(`/employees?${params.toString()}`);
     if (Array.isArray(data)) {
       setEmployees(data);
@@ -101,10 +114,12 @@ export default function EmployeesPage() {
       ]);
       setDesignations(d); setLocations(l); setProjects(p);
       setAllDepartments(dept);
+      const employeeRows = await api.get('/employees');
+      setManagers(Array.isArray(employeeRows) ? employeeRows : employeeRows.data ?? []);
     })();
   }, []);
 
-  useEffect(() => { load(); }, [search, statusFilter, page, pageSize]);
+  useEffect(() => { load(); }, [search, statusFilter, projectFilter, locationFilter, designationFilter, page, pageSize]);
 
   useEffect(() => {
     if (form.projectId) api.get(`/departments?projectId=${form.projectId}`).then(setDepartments);
@@ -124,6 +139,7 @@ export default function EmployeesPage() {
     () => locations.filter((l) => !assignmentForm.projectId || l.projectId === assignmentForm.projectId),
     [locations, assignmentForm.projectId],
   );
+  const visibleEmployees = useMemo(() => sortRows(employees, sortKey, sortDir), [employees, sortKey, sortDir]);
   const bulkInvalidRows = useMemo(() => {
     const rows = new Set<number>();
     for (const err of bulkErrors) {
@@ -145,7 +161,8 @@ export default function EmployeesPage() {
     setForm({
       employeeCode: employee.employeeCode, name: employee.name, email: employee.email, phone: employee.phone ?? '',
       designationId: employee.designationId, locationId: employee.locationId ?? '', projectId: employee.projectId ?? '',
-      departmentId: employee.departmentId ?? '', workforceCategory: employee.workforceCategory ?? 'PRIMARY',
+      departmentId: employee.departmentId ?? '', reportingManagerId: employee.reportingManagerId ?? '',
+      workforceCategory: employee.workforceCategory ?? 'PRIMARY',
     });
     setOpen(true);
   };
@@ -172,6 +189,7 @@ export default function EmployeesPage() {
     try {
       const payload: any = { ...form };
       if (!payload.departmentId) delete payload.departmentId;
+      if (!payload.reportingManagerId) delete payload.reportingManagerId;
       if (!payload.phone) delete payload.phone;
       if (editing) {
         delete payload.employeeCode;
@@ -226,6 +244,23 @@ export default function EmployeesPage() {
     }
   };
 
+  const openPasswordReset = (employee: any) => {
+    setSelected(employee);
+    setNewPassword('');
+    setResetOpen(true);
+  };
+
+  const resetPassword = async () => {
+    if (!selected || newPassword.length < 6) return toast('Password must be at least 6 characters', 'error');
+    try {
+      await api.put(`/auth/employees/${selected.id}/password`, { newPassword });
+      toast('Password reset', 'success');
+      setResetOpen(false);
+    } catch (e: any) {
+      toast(e.message, 'error');
+    }
+  };
+
   const downloadTemplate = async () => {
     const XLSX = await import('xlsx');
     const sampleProject = projects[0];
@@ -240,7 +275,6 @@ export default function EmployeesPage() {
         email: 'sample.employee@roster.com',
         phone: '+91-9000000000',
         status: 'ACTIVE',
-        workforceCategory: 'PRIMARY',
         project: sampleProject?.code || sampleProject?.name || 'Project name/code/id',
         location: sampleLocation?.name || 'Location name/id',
         designation: sampleDesignation?.name || 'Designation name/id',
@@ -254,11 +288,10 @@ export default function EmployeesPage() {
       ['email', 'Yes', 'Unique email address'],
       ['phone', 'No', 'Phone number'],
       ['status', 'No', 'ACTIVE, ON_LEAVE, PROBATION, TRAINING, SUSPENDED, RESIGNED, BENCH'],
-      ['workforceCategory', 'No', 'PRIMARY, BACKUP, TRAINEE'],
       ['project', 'Yes', 'Project name, code, or id'],
       ['location', 'Yes', 'Location name or id. Must belong to selected project'],
-      ['designation', 'Yes', 'Designation name or id'],
-      ['department', 'No', 'Department name or id'],
+      ['designation', 'Yes', 'Existing or new designation name, or id'],
+      ['department', 'No', 'Existing or new department name, or id. Blank is allowed'],
     ]);
     XLSX.utils.book_append_sheet(workbook, employeeSheet, 'Employees');
     XLSX.utils.book_append_sheet(workbook, instructionSheet, 'Instructions');
@@ -282,7 +315,7 @@ export default function EmployeesPage() {
       const email = getCell(row, ['email', 'email address']);
       const phone = getCell(row, ['phone', 'mobile']);
       const status = getCell(row, ['status']) || 'ACTIVE';
-      const workforceCategory = getCell(row, ['workforceCategory', 'workforce category', 'category']) || 'PRIMARY';
+      const workforceCategory = 'PRIMARY';
       const projectValue = getCell(row, ['projectId', 'project id', 'project', 'project code']);
       const locationValue = getCell(row, ['locationId', 'location id', 'location']);
       const designationValue = getCell(row, ['designationId', 'designation id', 'designation']);
@@ -293,19 +326,15 @@ export default function EmployeesPage() {
       const department = matchLookup(allDepartments, departmentValue, ['id', 'name']);
       const rowNumber = index + 2;
       const validStatuses = ['ACTIVE','ON_LEAVE','PROBATION','TRAINING','SUSPENDED','RESIGNED','BENCH'];
-      const validCategories = ['PRIMARY','BACKUP','TRAINEE'];
 
       if (!employeeCode) errors.push(`Row ${rowNumber}: employeeCode is required`);
       if (!name) errors.push(`Row ${rowNumber}: name is required`);
       if (!email) errors.push(`Row ${rowNumber}: email is required`);
       if (!project) errors.push(`Row ${rowNumber}: project not found`);
       if (!location) errors.push(`Row ${rowNumber}: location not found`);
-      if (!designation) errors.push(`Row ${rowNumber}: designation not found`);
+      if (!designationValue) errors.push(`Row ${rowNumber}: designation is required`);
       if (location && project && location.projectId !== project.id) errors.push(`Row ${rowNumber}: location does not belong to project`);
-      if (departmentValue && !department) errors.push(`Row ${rowNumber}: department not found`);
-      if (department && project && department.projectId !== project.id) errors.push(`Row ${rowNumber}: department does not belong to project`);
       if (status && !validStatuses.includes(status)) errors.push(`Row ${rowNumber}: status must be one of ${validStatuses.join(', ')}`);
-      if (workforceCategory && !validCategories.includes(workforceCategory)) errors.push(`Row ${rowNumber}: workforceCategory must be one of ${validCategories.join(', ')}`);
 
       return {
         employeeCode,
@@ -317,7 +346,9 @@ export default function EmployeesPage() {
         projectId: project?.id,
         locationId: location?.id,
         designationId: designation?.id,
-        departmentId: department?.id,
+        designationName: designation ? undefined : designationValue,
+        departmentId: department && project && department.projectId === project.id ? department.id : undefined,
+        departmentName: department && project && department.projectId === project.id ? undefined : departmentValue || undefined,
       };
     });
     setBulkRows(normalized);
@@ -354,7 +385,7 @@ export default function EmployeesPage() {
       <Topbar title="Employees" subtitle="Manage workforce roster" />
       <main className="p-4 md:p-6 space-y-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-1 gap-2 max-w-2xl">
+          <div className="flex flex-1 flex-wrap gap-2">
             <div className="relative flex-1">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
@@ -373,6 +404,26 @@ export default function EmployeesPage() {
               {['ACTIVE','ON_LEAVE','PROBATION','TRAINING','SUSPENDED','RESIGNED','BENCH'].map(s => (
                 <option key={s} value={s}>{s.replace('_', ' ')}</option>
               ))}
+            </Select>
+            <Select value={projectFilter} onChange={(e) => { setProjectFilter(e.target.value); setLocationFilter(''); setPage(1); }} className="w-44">
+              <option value="">All projects</option>
+              {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </Select>
+            <Select value={locationFilter} onChange={(e) => { setLocationFilter(e.target.value); setPage(1); }} className="w-44">
+              <option value="">All locations</option>
+              {locations.filter((l) => !projectFilter || l.projectId === projectFilter).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+            </Select>
+            <Select value={designationFilter} onChange={(e) => { setDesignationFilter(e.target.value); setPage(1); }} className="w-44">
+              <option value="">All designations</option>
+              {designations.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+            </Select>
+            <Select value={`${sortKey}:${sortDir}`} onChange={(e) => { const [key, dir] = e.target.value.split(':'); setSortKey(key); setSortDir(dir as SortDir); }} className="w-48">
+              <option value="name:asc">Name A-Z</option>
+              <option value="name:desc">Name Z-A</option>
+              <option value="employeeCode:asc">Code A-Z</option>
+              <option value="status:asc">Status A-Z</option>
+              <option value="project.name:asc">Project A-Z</option>
+              <option value="location.name:asc">Location A-Z</option>
             </Select>
           </div>
           <div className="flex gap-2">
@@ -425,14 +476,14 @@ export default function EmployeesPage() {
             </Dialog>
 
             <Dialog open={bulkValidationOpen} onOpenChange={setBulkValidationOpen}>
-              <DialogContent className="max-w-3xl">
-                <DialogHeader>
+              <DialogContent className="flex h-[85vh] max-w-5xl grid-rows-none flex-col gap-0 overflow-hidden p-0">
+                <DialogHeader className="border-b px-6 py-4">
                   <DialogTitle>Validate Employee Upload</DialogTitle>
                   <DialogDescription>
                     Review parsed rows and fix any issues before uploading employees.
                   </DialogDescription>
                 </DialogHeader>
-                <div className="space-y-4">
+                <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4">
                   <div className="grid gap-3 sm:grid-cols-3">
                     <div className="rounded-md border p-3">
                       <div className="text-xs text-muted-foreground">Total Rows</div>
@@ -449,7 +500,7 @@ export default function EmployeesPage() {
                   </div>
 
                   {bulkErrors.length > 0 ? (
-                    <div className="max-h-44 overflow-auto rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+                    <div className="max-h-36 overflow-auto rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
                       {bulkErrors.map((err) => <div key={err}>{err}</div>)}
                     </div>
                   ) : (
@@ -458,9 +509,9 @@ export default function EmployeesPage() {
                     </div>
                   )}
 
-                  <div className="rounded-md border">
+                  <div className="max-h-[42vh] overflow-auto rounded-md border">
                     <Table>
-                      <TableHeader>
+                      <TableHeader className="sticky top-0 bg-background">
                         <TableRow>
                           <TableHead>Employee Code</TableHead>
                           <TableHead>Name</TableHead>
@@ -479,7 +530,8 @@ export default function EmployeesPage() {
                             <TableCell className="text-xs">
                               <div>Project: {projects.find((p) => p.id === row.projectId)?.name ?? 'Not found'}</div>
                               <div>Location: {locations.find((l) => l.id === row.locationId)?.name ?? 'Not found'}</div>
-                              <div>Designation: {designations.find((d) => d.id === row.designationId)?.name ?? 'Not found'}</div>
+                              <div>Designation: {designations.find((d) => d.id === row.designationId)?.name ?? (row.designationName ? `New: ${row.designationName}` : 'Missing')}</div>
+                              <div>Department: {allDepartments.find((d) => d.id === row.departmentId)?.name ?? (row.departmentName ? `New: ${row.departmentName}` : 'None')}</div>
                             </TableCell>
                           </TableRow>
                         ))}
@@ -489,9 +541,9 @@ export default function EmployeesPage() {
                       </TableBody>
                     </Table>
                   </div>
-                  {bulkRows.length > 8 && <div className="text-xs text-muted-foreground">Showing first 8 rows of {bulkRows.length}.</div>}
+                  {bulkRows.length > 8 && <div className="text-xs text-muted-foreground">Showing first 8 rows of {bulkRows.length}. Scroll inside the table to review the preview.</div>}
                 </div>
-                <DialogFooter>
+                <DialogFooter className="border-t px-6 py-4">
                   <Button type="button" variant="outline" onClick={() => setBulkValidationOpen(false)}>
                     {bulkErrors.length > 0 ? 'Back to Upload' : 'Continue Editing'}
                   </Button>
@@ -559,11 +611,12 @@ export default function EmployeesPage() {
                       </Select>
                     </div>
                     <div className="space-y-1.5">
-                      <Label>Workforce Category</Label>
-                      <Select value={form.workforceCategory} onChange={(e) => setForm({ ...form, workforceCategory: e.target.value })}>
-                        <option value="PRIMARY">Primary</option>
-                        <option value="BACKUP">Backup / Reliever</option>
-                        <option value="TRAINEE">Trainee</option>
+                      <Label>Reporting Manager</Label>
+                      <Select value={form.reportingManagerId} onChange={(e) => setForm({ ...form, reportingManagerId: e.target.value })}>
+                        <option value="">No reporting manager</option>
+                        {managers
+                          .filter((manager) => manager.id !== editing?.id)
+                          .map((manager) => <option key={manager.id} value={manager.id}>{manager.name} ({manager.employeeCode})</option>)}
                       </Select>
                     </div>
                   </div>
@@ -588,14 +641,15 @@ export default function EmployeesPage() {
                   <TableHead>Location</TableHead>
                   <TableHead>Project</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>RM</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {employees.length === 0 && (
-                  <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground py-10">No employees found.</TableCell></TableRow>
+                  <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground py-10">No employees found.</TableCell></TableRow>
                 )}
-                {employees.map((employee) => (
+                {visibleEmployees.map((employee) => (
                   <TableRow key={employee.id}>
                     <TableCell className="font-mono text-xs">{employee.employeeCode}</TableCell>
                     <TableCell>
@@ -606,6 +660,7 @@ export default function EmployeesPage() {
                     <TableCell>{employee.location?.name ?? <span className="text-muted-foreground">Unassigned</span>}</TableCell>
                     <TableCell>{employee.project?.name ?? <span className="text-muted-foreground">Unassigned</span>}</TableCell>
                     <TableCell><Badge variant={statusVariant[employee.status]}>{employee.status.replace('_', ' ')}</Badge></TableCell>
+                    <TableCell>{employee.reportingManager?.name ?? <span className="text-muted-foreground">None</span>}</TableCell>
                     <TableCell className="text-right">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
@@ -619,6 +674,7 @@ export default function EmployeesPage() {
                             Assign/Unassign
                           </DropdownMenuItem>
                           <DropdownMenuItem onClick={() => loadDetails(employee, 'history')}><History className="h-4 w-4 mr-2" />Shift History</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => openPasswordReset(employee)}><KeyRound className="h-4 w-4 mr-2" />Reset Password</DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem disabled>Other future actions</DropdownMenuItem>
                           <DropdownMenuSeparator />
@@ -652,11 +708,11 @@ export default function EmployeesPage() {
                   ['Email', details.email],
                   ['Phone', details.phone || 'None'],
                   ['Status', details.status],
-                  ['Workforce Category', details.workforceCategory ?? 'PRIMARY'],
                   ['Designation', details.designation?.name],
                   ['Project', details.project?.name || 'Unassigned'],
                   ['Location', details.location?.name || 'Unassigned'],
                   ['Department', details.department?.name || 'None'],
+                  ['Reporting Manager', details.reportingManager?.name || 'None'],
                   ['Joined', formatDate(details.joinDate)],
                 ].map(([label, value]) => (
                   <div key={label} className="rounded-md border p-3">
@@ -726,6 +782,23 @@ export default function EmployeesPage() {
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setAssignmentOpen(false)}>Cancel</Button>
               <Button type="button" onClick={saveAssignment}>Save Assignment</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={resetOpen} onOpenChange={setResetOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Reset Employee Password</DialogTitle>
+              <DialogDescription>{selected?.name}</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-1.5">
+              <Label>New Password</Label>
+              <Input type="password" minLength={6} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setResetOpen(false)}>Cancel</Button>
+              <Button type="button" onClick={resetPassword}>Reset Password</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>

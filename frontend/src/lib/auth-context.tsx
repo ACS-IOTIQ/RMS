@@ -4,7 +4,7 @@ import { createContext, useContext, useEffect, useState, ReactNode } from 'react
 import { useRouter } from 'next/navigation';
 import { api, setToken } from './api';
 
-export type Role = 'ADMIN' | 'EMPLOYEE';
+export type Role = 'ADMIN' | 'ROSTER_MANAGER' | 'PROJECT_MANAGER' | 'COMPLIANCE_ADMIN' | 'EMPLOYEE';
 
 export interface User {
   id: string;
@@ -15,9 +15,19 @@ export interface User {
     id: string;
     name: string;
     employeeCode: string;
-    designation?: { name: string };
-    location?: { name: string };
-    project?: { name: string };
+    email?: string;
+    phone?: string | null;
+    status?: string;
+    joinDate?: string;
+    maxWeeklyHours?: number;
+    preferredShifts?: string[];
+    workforceCategory?: string;
+    designation?: { id?: string; name: string; level?: number; isCritical?: boolean };
+    department?: { id?: string; name: string; capacity?: number } | null;
+    location?: { id?: string; name: string; timezone?: string; capacity?: number };
+    project?: { id?: string; name: string; code?: string; clientName?: string | null; timezone?: string };
+    reportingManager?: { id: string; name: string; employeeCode: string; email: string } | null;
+    _count?: { directReports: number };
   } | null;
 }
 

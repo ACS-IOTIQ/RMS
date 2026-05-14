@@ -1,10 +1,11 @@
 'use client';
-import { useEffect, useState } from 'react';
-import { Award, MoreVertical, Pencil, Settings2, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Award, MoreVertical, Pencil, Search, Trash2 } from 'lucide-react';
 import { Topbar } from '@/components/topbar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -17,8 +18,9 @@ import {
 import { PaginationControls, PaginationMeta } from '@/components/ui/pagination';
 import { api } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
+import { SortDir, filterByQuery, sortRows } from '@/lib/table-tools';
 
-const emptyForm = { name: '', level: 1, isCritical: false, minStaffing: 1 };
+const emptyForm = { name: '', level: 1, isCritical: false };
 const emptyMeta: PaginationMeta = { page: 1, pageSize: 10, total: 0, totalPages: 1 };
 
 export default function DesignationsPage() {
@@ -26,13 +28,13 @@ export default function DesignationsPage() {
   const [meta, setMeta] = useState<PaginationMeta>(emptyMeta);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const [search, setSearch] = useState('');
+  const [criticalFilter, setCriticalFilter] = useState('');
+  const [sortKey, setSortKey] = useState('name');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [open, setOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [eligibilityOpen, setEligibilityOpen] = useState(false);
   const [editing, setEditing] = useState<any>(null);
-  const [eligibilityEditing, setEligibilityEditing] = useState<any>(null);
-  const [shifts, setShifts] = useState<any[]>([]);
-  const [eligibilityCounts, setEligibilityCounts] = useState<Record<string, number>>({});
   const [form, setForm] = useState(emptyForm);
   const [initialForm, setInitialForm] = useState(emptyForm);
   const { toast } = useToast();
@@ -46,6 +48,10 @@ export default function DesignationsPage() {
   useEffect(() => { load(); }, [page, pageSize]);
 
   const dirty = JSON.stringify(form) !== JSON.stringify(initialForm);
+  const visibleItems = useMemo(() => {
+    const scoped = criticalFilter ? items.filter((item) => String(item.isCritical) === criticalFilter) : items;
+    return sortRows(filterByQuery(scoped, search, ['name']), sortKey, sortDir);
+  }, [items, criticalFilter, search, sortKey, sortDir]);
 
   const openNew = () => {
     setEditing(null);
@@ -59,7 +65,6 @@ export default function DesignationsPage() {
       name: designation.name,
       level: designation.level,
       isCritical: designation.isCritical,
-      minStaffing: designation.minStaffing,
     };
     setEditing(designation);
     setForm(next);
@@ -73,7 +78,7 @@ export default function DesignationsPage() {
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const payload = { ...form, level: Number(form.level), minStaffing: Number(form.minStaffing) };
+      const payload = { ...form, level: Number(form.level) };
       if (editing) await api.put(`/designations/${editing.id}`, payload);
       else await api.post('/designations', payload);
       toast(editing ? 'Updated' : 'Created', 'success');
@@ -87,55 +92,36 @@ export default function DesignationsPage() {
     try { await api.del(`/designations/${id}`); toast('Deleted', 'success'); load(); } catch (e: any) { toast(e.message, 'error'); }
   };
 
-  const openEligibility = async (designation: any) => {
-    setEligibilityEditing(designation);
-    const data = await api.get('/shifts');
-    setShifts(data);
-    const counts: Record<string, number> = {};
-    for (const shift of data) {
-      const req = shift.requirements?.find((r: any) => r.designationId === designation.id);
-      counts[shift.id] = req?.minCount ?? 0;
-    }
-    setEligibilityCounts(counts);
-    setEligibilityOpen(true);
-  };
-
-  const saveEligibility = async () => {
-    try {
-      await Promise.all(shifts.map((shift) => {
-        const others = (shift.requirements ?? [])
-          .filter((r: any) => r.designationId !== eligibilityEditing.id)
-          .map((r: any) => ({ designationId: r.designationId, minCount: r.minCount }));
-        const minCount = Number(eligibilityCounts[shift.id] ?? 0);
-        const items = minCount > 0 ? [...others, { designationId: eligibilityEditing.id, minCount }] : others;
-        return api.put(`/shifts/${shift.id}/requirements`, { items });
-      }));
-      toast('Shift eligibility saved', 'success');
-      setEligibilityOpen(false);
-      load();
-    } catch (e: any) {
-      toast(e.message, 'error');
-    }
-  };
-
   return (
     <>
-      <Topbar title="Designations" subtitle="Hierarchy, critical roles, staffing, and shift eligibility" />
+      <Topbar title="Designations" subtitle="Critical role tagging" />
       <main className="p-4 md:p-6 space-y-4">
-        <div className="flex justify-end">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-1 flex-wrap gap-2">
+            <div className="relative min-w-56 flex-1">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input className="pl-9" placeholder="Search designations..." value={search} onChange={(e) => setSearch(e.target.value)} />
+            </div>
+            <Select value={criticalFilter} onChange={(e) => setCriticalFilter(e.target.value)} className="w-44">
+              <option value="">All criticality</option>
+              <option value="true">Critical</option>
+              <option value="false">Non-critical</option>
+            </Select>
+            <Select value={`${sortKey}:${sortDir}`} onChange={(e) => { const [key, dir] = e.target.value.split(':'); setSortKey(key); setSortDir(dir as SortDir); }} className="w-48">
+              <option value="name:asc">Name A-Z</option>
+              <option value="name:desc">Name Z-A</option>
+              <option value="_count.employees:desc">Employees high-low</option>
+            </Select>
+          </div>
           <Dialog open={open} onOpenChange={(next) => next ? setOpen(true) : requestClose()}>
             <DialogTrigger asChild><Button onClick={openNew}><Award className="h-4 w-4 mr-1.5" />Add Designation</Button></DialogTrigger>
             <DialogContent onInteractOutside={(e) => e.preventDefault()} onEscapeKeyDown={(e) => e.preventDefault()}>
               <DialogHeader>
                 <DialogTitle>{editing ? 'Edit Designation' : 'New Designation'}</DialogTitle>
-                <DialogDescription>Configure hierarchy level, critical tagging, and minimum staffing.</DialogDescription>
+                <DialogDescription>Configure designation name and critical tagging.</DialogDescription>
               </DialogHeader>
               <form onSubmit={onSubmit} className="space-y-3">
                 <div className="space-y-1.5"><Label>Name</Label><Input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1.5"><Label>Hierarchy Level</Label><Input type="number" min={1} max={10} value={form.level} onChange={(e) => setForm({ ...form, level: Number(e.target.value) })} /></div>
-                  <div className="space-y-1.5"><Label>Min Staffing</Label><Input type="number" min={0} value={form.minStaffing} onChange={(e) => setForm({ ...form, minStaffing: Number(e.target.value) })} /></div>
-                </div>
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
                   <input type="checkbox" checked={form.isCritical} onChange={(e) => setForm({ ...form, isCritical: e.target.checked })} className="h-4 w-4 rounded border" />
                   Critical designation
@@ -148,23 +134,19 @@ export default function DesignationsPage() {
 
         <Card><CardContent className="p-0">
           <Table>
-            <TableHeader><TableRow><TableHead>Designation</TableHead><TableHead>Level</TableHead><TableHead>Critical</TableHead><TableHead>Min Staffing</TableHead><TableHead>Shift Eligibility</TableHead><TableHead>Employees</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>Designation</TableHead><TableHead>Critical</TableHead><TableHead>Employees</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
             <TableBody>
-              {items.length === 0 && <TableRow><TableCell colSpan={7} className="text-center py-10 text-muted-foreground">No designations yet.</TableCell></TableRow>}
-              {items.map((designation) => (
+              {visibleItems.length === 0 && <TableRow><TableCell colSpan={4} className="text-center py-10 text-muted-foreground">No designations yet.</TableCell></TableRow>}
+              {visibleItems.map((designation) => (
                 <TableRow key={designation.id}>
                   <TableCell><div className="flex items-center gap-2"><div className="h-8 w-8 rounded-md bg-amber-500/10 text-amber-600 flex items-center justify-center"><Award className="h-4 w-4" /></div><span className="font-medium">{designation.name}</span></div></TableCell>
-                  <TableCell><Badge variant="outline">L{designation.level}</Badge></TableCell>
                   <TableCell>{designation.isCritical ? <Badge variant="warning">Critical</Badge> : <span className="text-muted-foreground">No</span>}</TableCell>
-                  <TableCell>{designation.minStaffing}</TableCell>
-                  <TableCell>{designation.shiftRequirements?.length ?? 0} shift(s)</TableCell>
                   <TableCell>{designation._count?.employees ?? 0}</TableCell>
                   <TableCell className="text-right">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild><Button size="icon" variant="ghost"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem onClick={() => openEdit(designation)}><Pencil className="h-4 w-4 mr-2" />Edit</DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => openEligibility(designation)}><Settings2 className="h-4 w-4 mr-2" />Shift Eligibility</DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem className="text-destructive" onClick={() => onDelete(designation.id)}><Trash2 className="h-4 w-4 mr-2" />Delete</DropdownMenuItem>
                       </DropdownMenuContent>
@@ -184,32 +166,6 @@ export default function DesignationsPage() {
           </DialogContent>
         </Dialog>
 
-        <Dialog open={eligibilityOpen} onOpenChange={setEligibilityOpen}>
-          <DialogContent className="max-w-2xl">
-            <DialogHeader>
-              <DialogTitle>Shift Eligibility</DialogTitle>
-              <DialogDescription>{eligibilityEditing?.name}. Set minimum staffing per shift; zero means not eligible.</DialogDescription>
-            </DialogHeader>
-            <div className="max-h-96 overflow-auto space-y-2">
-              {shifts.map((shift) => (
-                <div key={shift.id} className="flex items-center gap-3 rounded-md border p-3">
-                  <div className="flex-1">
-                    <div className="font-medium text-sm">{shift.code} - {shift.name}</div>
-                    <div className="text-xs text-muted-foreground">{shift.location?.name} / {shift.location?.project?.name}</div>
-                  </div>
-                  <Input
-                    type="number"
-                    min={0}
-                    className="w-28"
-                    value={eligibilityCounts[shift.id] ?? 0}
-                    onChange={(e) => setEligibilityCounts({ ...eligibilityCounts, [shift.id]: Number(e.target.value) })}
-                  />
-                </div>
-              ))}
-            </div>
-            <DialogFooter><Button type="button" variant="outline" onClick={() => setEligibilityOpen(false)}>Cancel</Button><Button type="button" onClick={saveEligibility}>Save Eligibility</Button></DialogFooter>
-          </DialogContent>
-        </Dialog>
       </main>
     </>
   );

@@ -26,11 +26,6 @@ class UpdateShiftDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) priority?: number;
 }
 
-class RequirementDto {
-  @IsString() @IsNotEmpty() designationId: string;
-  @Type(() => Number) @IsInt() @Min(0) minCount: number;
-}
-
 @Injectable()
 export class ShiftsService {
   constructor(private prisma: PrismaService) {}
@@ -41,7 +36,6 @@ export class ShiftsService {
     if (projectId) where.location = { projectId };
     const include = {
       location: { include: { project: true } },
-      requirements: { include: { designation: true } },
     };
     const orderBy = [{ priority: 'desc' as const }, { code: 'asc' as const }];
     if (!page && !pageSize) return this.prisma.shift.findMany({ where, include, orderBy });
@@ -71,7 +65,7 @@ export class ShiftsService {
   get(id: string) {
     return this.prisma.shift.findUnique({
       where: { id },
-      include: { location: { include: { project: true } }, requirements: { include: { designation: true } } },
+      include: { location: { include: { project: true } } },
     });
   }
 
@@ -95,20 +89,6 @@ export class ShiftsService {
     const shift = await this.prisma.shift.delete({ where: { id } });
     await this.audit('SHIFT_DELETE', id, actor, previous, null);
     return shift;
-  }
-
-  async setRequirements(shiftId: string, items: RequirementDto[], actor: any) {
-    const previous = await this.get(shiftId);
-    await this.prisma.shiftRequirement.deleteMany({ where: { shiftId } });
-    const nonZeroItems = items.filter((i) => Number(i.minCount) > 0);
-    if (nonZeroItems.length > 0) {
-      await this.prisma.shiftRequirement.createMany({
-        data: nonZeroItems.map((i) => ({ ...i, shiftId })),
-      });
-    }
-    const updated = await this.get(shiftId);
-    await this.audit('SHIFT_REQUIREMENTS_UPDATE', shiftId, actor, previous, updated);
-    return updated;
   }
 
   private async nextCode(locationId: string) {
@@ -164,10 +144,6 @@ export class ShiftsController {
     return this.svc.update(id, dto, user);
   }
   @Roles(UserRole.ADMIN) @Delete(':id') remove(@Param('id') id: string, @CurrentUser() user: any) { return this.svc.remove(id, user); }
-  @Roles(UserRole.ADMIN) @Put(':id/requirements')
-  setReq(@Param('id') id: string, @Body() body: { items: RequirementDto[] }, @CurrentUser() user: any) {
-    return this.svc.setRequirements(id, body.items ?? [], user);
-  }
 }
 
 @Module({ controllers: [ShiftsController], providers: [ShiftsService] })

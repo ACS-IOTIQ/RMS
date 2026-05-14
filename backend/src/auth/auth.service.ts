@@ -15,7 +15,7 @@ export class AuthService {
   async login(dto: LoginDto) {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
-      include: { employee: true },
+      include: this.userProfileInclude(),
     });
     if (!user) throw new UnauthorizedException('Invalid credentials');
 
@@ -57,7 +57,7 @@ export class AuthService {
         role,
         employeeId,
       },
-      include: { employee: true },
+      include: this.userProfileInclude(),
     });
 
     const token = this.signToken(user);
@@ -67,19 +67,43 @@ export class AuthService {
   async me(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      include: {
-        employee: {
-          include: {
-            designation: true,
-            location: true,
-            project: true,
-            department: true,
-          },
-        },
-      },
+      include: this.userProfileInclude(),
     });
     if (!user) throw new UnauthorizedException();
     return this.sanitize(user);
+  }
+
+  async changePassword(userId: string, currentPassword: string, newPassword: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new UnauthorizedException();
+    const ok = await bcrypt.compare(currentPassword, user.password);
+    if (!ok) throw new BadRequestException('Current password is incorrect');
+    const hash = await bcrypt.hash(newPassword, 10);
+    await this.prisma.user.update({ where: { id: userId }, data: { password: hash } });
+    return { ok: true };
+  }
+
+  async resetEmployeePassword(employeeId: string, newPassword: string) {
+    const user = await this.prisma.user.findUnique({ where: { employeeId } });
+    if (!user) throw new BadRequestException('Employee does not have a user account');
+    const hash = await bcrypt.hash(newPassword, 10);
+    await this.prisma.user.update({ where: { id: user.id }, data: { password: hash } });
+    return { ok: true };
+  }
+
+  private userProfileInclude() {
+    return {
+      employee: {
+        include: {
+          designation: true,
+          location: true,
+          project: true,
+          department: true,
+          reportingManager: { select: { id: true, name: true, employeeCode: true, email: true } },
+          _count: { select: { directReports: true } },
+        },
+      },
+    };
   }
 
   private signToken(user: any) {

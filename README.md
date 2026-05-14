@@ -83,7 +83,7 @@ All routes are prefixed with `/api`. Protected routes require `Authorization: Be
 | Designations     | `GET/POST/PUT/DELETE /designations[/:id]`                                 |
 | Employees        | `GET/POST/PUT/DELETE /employees[/:id]?q=&status=&projectId=&locationId=`  |
 | Shifts           | `GET/POST/PUT/DELETE /shifts[/:id]?locationId=…`                          |
-|                  | `PUT /shifts/:id/requirements` — `{ items: [{designationId, minCount}] }` |
+| Roster Policies  | `PUT /roster-policies/:id/designation-requirements`                       |
 | Roster           | `GET /roster?from=&to=&locationId=&employeeId=`                           |
 |                  | `GET /roster/my?from=&to=` *(employee scope)*                             |
 |                  | `GET /roster/coverage?locationId=&date=`                                  |

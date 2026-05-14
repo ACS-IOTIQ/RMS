@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
-import { Briefcase, MoreVertical, Pencil, Plus, Trash2, Users } from 'lucide-react';
+import { Briefcase, MoreVertical, Pencil, Plus, Search, Trash2, Users } from 'lucide-react';
 import { Topbar } from '@/components/topbar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { api } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
+import { SortDir, filterByQuery, sortRows } from '@/lib/table-tools';
 
 const emptyForm = { name: '', organizationId: '', clientName: '', timezone: 'Asia/Kolkata' };
 
@@ -26,6 +27,10 @@ export default function ProjectsPage() {
   const [locations, setLocations] = useState<any[]>([]);
   const [designations, setDesignations] = useState<any[]>([]);
   const [departments, setDepartments] = useState<any[]>([]);
+  const [search, setSearch] = useState('');
+  const [orgFilter, setOrgFilter] = useState('');
+  const [sortKey, setSortKey] = useState('name');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [open, setOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [assignmentOpen, setAssignmentOpen] = useState(false);
@@ -62,6 +67,10 @@ export default function ProjectsPage() {
     () => locations.filter((l) => !assignmentProject || l.projectId === assignmentProject.id),
     [locations, assignmentProject],
   );
+  const visibleItems = useMemo(() => {
+    const scoped = orgFilter ? items.filter((project) => project.organizationId === orgFilter) : items;
+    return sortRows(filterByQuery(scoped, search, ['name', 'code', 'clientName', 'organization.name']), sortKey, sortDir);
+  }, [items, orgFilter, search, sortKey, sortDir]);
 
   const loadCandidates = async () => {
     if (!assignmentProject) return;
@@ -177,7 +186,24 @@ export default function ProjectsPage() {
     <>
       <Topbar title="Projects" subtitle="Operational projects within organizations" />
       <main className="p-4 md:p-6 space-y-4">
-        <div className="flex justify-end">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-1 flex-wrap gap-2">
+            <div className="relative min-w-56 flex-1">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input className="pl-9" placeholder="Search projects..." value={search} onChange={(e) => setSearch(e.target.value)} />
+            </div>
+            <Select value={orgFilter} onChange={(e) => setOrgFilter(e.target.value)} className="w-52">
+              <option value="">All organizations</option>
+              {orgs.map((org) => <option key={org.id} value={org.id}>{org.name}</option>)}
+            </Select>
+            <Select value={`${sortKey}:${sortDir}`} onChange={(e) => { const [key, dir] = e.target.value.split(':'); setSortKey(key); setSortDir(dir as SortDir); }} className="w-48">
+              <option value="name:asc">Name A-Z</option>
+              <option value="name:desc">Name Z-A</option>
+              <option value="code:asc">Code A-Z</option>
+              <option value="_count.employees:desc">Employees high-low</option>
+              <option value="_count.locations:desc">Locations high-low</option>
+            </Select>
+          </div>
           <Dialog open={open} onOpenChange={(next) => next ? setOpen(true) : requestClose()}>
             <DialogTrigger asChild><Button onClick={openNew}><Plus className="h-4 w-4 mr-1.5" />Add Project</Button></DialogTrigger>
             <DialogContent
@@ -216,8 +242,8 @@ export default function ProjectsPage() {
           <Table>
             <TableHeader><TableRow><TableHead>Project</TableHead><TableHead>Code</TableHead><TableHead>Organization</TableHead><TableHead>Locations</TableHead><TableHead>Employees</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
             <TableBody>
-              {items.length === 0 && <TableRow><TableCell colSpan={6} className="text-center py-10 text-muted-foreground">No projects yet.</TableCell></TableRow>}
-              {items.map((project) => (
+              {visibleItems.length === 0 && <TableRow><TableCell colSpan={6} className="text-center py-10 text-muted-foreground">No projects yet.</TableCell></TableRow>}
+              {visibleItems.map((project) => (
                 <TableRow key={project.id}>
                   <TableCell><div className="flex items-center gap-2"><div className="h-8 w-8 rounded-md bg-blue-500/10 text-blue-600 flex items-center justify-center"><Briefcase className="h-4 w-4" /></div><div><div className="font-medium">{project.name}</div>{project.clientName && <div className="text-xs text-muted-foreground">{project.clientName}</div>}</div></div></TableCell>
                   <TableCell className="font-mono text-xs">{project.code}</TableCell>
