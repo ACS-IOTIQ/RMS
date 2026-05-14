@@ -279,8 +279,12 @@ export class RosterPoliciesService {
     const project = await this.prisma.project.findUnique({ where: { id: policy.projectId } });
     if (!project) throw new BadRequestException('Project not found');
     const distribution = cleanDistribution(policy.shiftDistributionJson);
+    const shiftTemplates = await this.projectShiftTemplates(policy.projectId);
     const allCells = await this.prisma.multiLocationCoverageCell.findMany({
-      where: { policyId: id },
+      where: {
+        policyId: id,
+        shiftId: { in: shiftTemplates.map((shift) => shift.id) },
+      },
       include: { location: true, shift: true },
     });
     const cells = allCells.filter((cell) => (
@@ -501,6 +505,16 @@ export class RosterPoliciesService {
         coverageMode: CoverageMode.PROJECT_SHARED,
       })),
       skipDuplicates: true,
+    });
+    await this.prisma.multiLocationCoverageCell.deleteMany({
+      where: {
+        policyId,
+        OR: [
+          { shiftId: { notIn: shiftTemplates.map((shift) => shift.id) } },
+          { locationId: { notIn: locations.map((location) => location.id) } },
+          { designationId: { notIn: designations.map((designation) => designation.id) } },
+        ],
+      },
     });
     const operations: any[] = [];
     for (const location of locations) {
@@ -1163,10 +1177,19 @@ export class RosterPoliciesService {
     const shifts = await this.prisma.shift.findMany({
       where: { location: { projectId } },
       include: { location: true },
-      orderBy: [{ priority: 'desc' }, { code: 'asc' }, { name: 'asc' }],
+    });
+    const ordered = [...shifts].sort((a, b) => {
+      if (a.priority !== b.priority) return b.priority - a.priority;
+      const codeDiff = String(a.code).localeCompare(String(b.code));
+      if (codeDiff !== 0) return codeDiff;
+      const nameDiff = String(a.name).localeCompare(String(b.name));
+      if (nameDiff !== 0) return nameDiff;
+      const locationDiff = String(a.location?.name ?? '').localeCompare(String(b.location?.name ?? ''));
+      if (locationDiff !== 0) return locationDiff;
+      return String(a.id).localeCompare(String(b.id));
     });
     const byCode = new Map<string, any>();
-    for (const shift of shifts) {
+    for (const shift of ordered) {
       const code = String(shift.code);
       if (!byCode.has(code)) byCode.set(code, shift);
     }
