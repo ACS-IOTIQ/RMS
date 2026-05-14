@@ -4,7 +4,7 @@ import { AuthProvider } from '@/lib/auth-context';
 import { ToastProvider } from '@/components/ui/toast';
 
 export const metadata: Metadata = {
-  title: 'RosterOps — Workforce Orchestration',
+  title: 'RosterOps - Workforce Orchestration',
   description: 'Enterprise intelligent workforce roster management',
 };
 

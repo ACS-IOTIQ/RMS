@@ -1,214 +1,496 @@
-# RosterOps — Enterprise Workforce Roster Management System
+# RosterOps - Enterprise Roster Management System
 
-A full-stack enterprise workforce orchestration platform with intelligent auto-rostering, fairness scoring, leave-aware reallocation, and a modern, clean UI.
+RosterOps is a full-stack workforce roster management platform for project-based operations. It helps teams configure organizations, projects, locations, shifts, designations, employees, roster policies, leave approvals, audit logs, and employee self-service from one system.
 
-> **Stack:** Next.js 14 (App Router, TypeScript) + NestJS 10 + PostgreSQL 16 + Prisma + Tailwind + Radix UI + Recharts — all orchestrated via Docker Compose.
+The current implementation is designed for operations where employees are mapped to projects and locations, and where roster planning must support both location-level staffing and project-level designation coverage across multiple locations.
 
----
+## Tech Stack
 
-## 🚀 Quick Start
+### Frontend
 
-You only need **Docker** installed.
+- Next.js 14 App Router
+- React 18
+- TypeScript
+- Tailwind CSS
+- Radix UI primitives
+- shadcn-style local UI components
+- lucide-react icons
+- Recharts for analytics visualizations
+- xlsx for Excel import/export flows
 
-```bash
-# 1. unzip the project
-unzip roster-system.zip
-cd roster-system
+### Backend
 
-# 2. start everything
-docker compose up -d --build
+- NestJS 10
+- TypeScript
+- Prisma ORM
+- PostgreSQL 16
+- JWT authentication
+- Passport JWT strategy
+- bcrypt password hashing
+- class-validator and class-transformer for DTO validation
+- xlsx for Excel exports
 
-# 3. wait ~30s for services to boot, then open
-# Frontend → http://localhost:3000
-# Backend  → http://localhost:3001/api
+### Infrastructure
+
+- Docker Compose
+- Node.js 20 Alpine images
+- PostgreSQL 16 Alpine
+- Prisma `db push` schema sync on backend container startup
+- GitHub Actions deployment workflow using SSH password authentication
+
+## Main Features
+
+### Admin Portal
+
+- Dashboard for high-level workforce and roster visibility.
+- Organization management.
+- Project management with employee assignment support.
+- Location management.
+- Department management.
+- Designation management.
+- Shift management.
+- Employee management with search, filters, status, project, location, department, designation, and reporting manager mapping.
+- Employee bulk upload support with relaxed department/designation handling.
+- Roster policy configuration.
+- Multi-location designation planning.
+- Weekly roster preview and publish flow.
+- Leave management and reporting-manager approval flow.
+- Audit logs visible to admins.
+- Admin password reset for employees.
+
+### Employee Portal
+
+- Employee dashboard.
+- Published roster calendar.
+- Leave request submission and status tracking.
+- Profile page with project, location, designation, department, reporting manager, and account details.
+- Self password change.
+
+### Roster Policy
+
+Roster policy is the central place for roster rules:
+
+- Required daily headcount.
+- Working days per employee.
+- Weekly off count.
+- Week start day.
+- Minimum rest hours.
+- Shift distribution.
+- General/buffer rules.
+- Overtime and extra-duty flags.
+- Designation requirements by shift.
+- Excel-style designation requirement upload/download.
+
+Designation staffing counts are configured in Roster Policy, not in Shifts or Designations.
+
+### Multi-Location Designation Planning
+
+The All Locations mode in Roster Policy supports project-level designation planning:
+
+- Locations are shown as grouped headers.
+- Morning, Afternoon, and Night appear under every location.
+- Designations appear as rows.
+- The grid works like an Excel-style planning table.
+- Generate Coverage fills computed values directly into the grid.
+- Manual edits override generated values.
+- Apply to Locations writes effective grid counts into individual location policies.
+- Project-level shared coverage allows a designation to be present across shifts somewhere in the project, instead of forcing every location to cover every designation in every shift.
+
+Coverage generation uses active employees by `project + location + designation`:
+
+- 7 employees with 40/40/20 distribution becomes `3 / 3 / 1`.
+- 4 employees becomes `2 / 1 / 1`.
+- 3 employees becomes `1 / 1 / 1`.
+- 2 employees are balanced across the lowest-covered shifts.
+- 1 employee is assigned to one shift only.
+
+### Roster Generation
+
+The weekly roster engine uses location-level policy and designation requirements as the source of truth. All Locations planning affects roster generation only after the user applies grid counts to individual locations.
+
+Roster generation considers:
+
+- Active primary employees.
+- Project and location mapping.
+- Designation requirements.
+- Working days and weekly offs.
+- Shift distribution.
+- Minimum rest hour rules.
+- Leave conflicts.
+- Published roster visibility for employee portal.
+- Validation issues and warning signals.
+
+### Leave Management
+
+- Employees can submit leave requests.
+- Each employee can have a reporting manager.
+- Leave approval requests are routed for manager/admin decision.
+- Approved leave affects roster availability.
+
+### Audit Logs
+
+The system records important actions such as:
+
+- Create/update/delete operations.
+- Roster policy changes.
+- Multi-location policy generate/save/apply/export events.
+- Leave decisions.
+- Password changes and resets.
+
+Audit logs include basic tamper-evident metadata for administrative review.
+
+## Current Project Structure
+
+```text
+roster-system/
+├── backend/
+│   ├── prisma/
+│   │   └── schema.prisma
+│   ├── src/
+│   │   ├── analytics/
+│   │   ├── audit/
+│   │   ├── auth/
+│   │   ├── departments/
+│   │   ├── designations/
+│   │   ├── employees/
+│   │   ├── leaves/
+│   │   ├── locations/
+│   │   ├── organizations/
+│   │   ├── prisma/
+│   │   ├── projects/
+│   │   ├── roster-policies/
+│   │   ├── rosters/
+│   │   └── shifts/
+│   ├── Dockerfile
+│   └── package.json
+├── frontend/
+│   ├── src/
+│   │   ├── app/
+│   │   │   ├── admin/
+│   │   │   ├── employee/
+│   │   │   ├── login/
+│   │   │   └── register/
+│   │   ├── components/
+│   │   └── lib/
+│   ├── Dockerfile
+│   └── package.json
+├── docker-compose.yml
+├── .github/
+│   └── workflows/
+│       └── deploy.yaml
+└── README.md
 ```
 
-The backend syncs the Prisma schema to Postgres (`prisma db push`) on boot. Fresh database volumes start empty: no demo users, employees, shifts, or organization data are inserted automatically.
+## Quick Start With Docker
 
----
-
-## 📦 What's included
-
-### Backend (NestJS) — `/backend`
-- **Auth**: JWT (bearer token), bcrypt password hashing, `ADMIN` / `EMPLOYEE` roles, route-level role guards
-- **Organizations / Projects / Locations / Departments / Designations**: full CRUD
-- **Employees**: CRUD, search, status filter, bulk-friendly schema, employee lifecycle states (`ACTIVE`, `ON_LEAVE`, `RESIGNED`, …)
-- **Shifts**: CRUD + per-shift designation requirements (e.g. "Night shift needs 1× L4, 2× L3")
-- **Roster engine**: auto-generation across a date range, fairness scoring (60-day allocation history), leave-aware exclusion, critical-shift prioritization, designation requirement enforcement, gap reporting
-- **Leaves**: apply / approve / reject, cascade-cancel impacted roster entries on approval
-- **Analytics**: workforce overview, status & designation breakdowns, shift distribution, fairness (night-shift load), monthly leave trends
-
-### Frontend (Next.js 14) — `/frontend`
-- **Login** with split-screen brand panel, **Register** with employee-code linking
-- **Admin portal**: Dashboard, Employees, Organizations, Projects, Locations, Designations, Shifts (with requirements editor), Roster (auto-generate + grid + coverage), Leaves (approve/reject), Analytics
-- **Employee portal**: Dashboard (today/tomorrow shifts, night-shift count), My Roster (month calendar), My Leaves (apply + history), Profile
-- Tailwind + Radix UI + shadcn-style components, Recharts charts, lucide-react icons
-- Light/dark color tokens, responsive layout, persistent sidebar with role-aware nav
-
-### Infra — `docker-compose.yml`
-- `postgres` — Postgres 16 Alpine, healthchecked, named volume
-- `backend` — Node 20 Alpine, multi-stage build, runs `prisma db push` (schema sync) → `node dist/main.js`
-- `frontend` — Node 20 Alpine, builds Next.js production bundle, served on port 3000
-
----
-
-## 🧠 The Roster Engine (in brief)
-
-The auto-generator at `POST /api/roster/generate` does this for each day in the range:
-
-1. Load active employees in the location.
-2. Exclude employees with **approved** leaves overlapping the day.
-3. Sort shifts: critical shifts first.
-4. For each shift's designation requirements (`{ designationId, minCount }`):
-   - Find eligible employees (matching designation, not on leave, not yet assigned today).
-   - Rank by **fairness**: least allocations to *this* shift in the last 60 days, then least overall.
-   - Pick top `minCount`.
-5. Report any gaps (e.g. "2025-05-12 C: need 1 of designation, only 0 available").
-
-`mode: "overwrite"` (default) clears existing entries in range; `mode: "fill-gaps"` preserves them.
-
----
-
-## 🛠️ API Reference (high level)
-
-All routes are prefixed with `/api`. Protected routes require `Authorization: Bearer <token>`.
-
-| Resource         | Routes                                                                    |
-| ---------------- | ------------------------------------------------------------------------- |
-| Auth             | `POST /auth/login`, `POST /auth/register`, `GET /auth/me`                 |
-| Organizations    | `GET/POST/PUT/DELETE /organizations[/:id]`                                |
-| Projects         | `GET/POST/PUT/DELETE /projects[/:id]?organizationId=…`                    |
-| Locations        | `GET/POST/PUT/DELETE /locations[/:id]?projectId=…`                        |
-| Departments      | `GET/POST/PUT/DELETE /departments[/:id]?projectId=…`                      |
-| Designations     | `GET/POST/PUT/DELETE /designations[/:id]`                                 |
-| Employees        | `GET/POST/PUT/DELETE /employees[/:id]?q=&status=&projectId=&locationId=`  |
-| Shifts           | `GET/POST/PUT/DELETE /shifts[/:id]?locationId=…`                          |
-| Roster Policies  | `PUT /roster-policies/:id/designation-requirements`                       |
-| Roster           | `GET /roster?from=&to=&locationId=&employeeId=`                           |
-|                  | `GET /roster/my?from=&to=` *(employee scope)*                             |
-|                  | `GET /roster/coverage?locationId=&date=`                                  |
-|                  | `POST /roster/generate` — `{ locationId, startDate, endDate, mode? }`     |
-|                  | `POST /roster/assign` — `{ employeeId, shiftId, date, notes? }`           |
-| Leaves           | `GET /leaves?status=&employeeId=`, `GET /leaves/my`                       |
-|                  | `POST /leaves` — `{ type, startDate, endDate, reason? }`                  |
-|                  | `PUT /leaves/:id/decision` — `{ status: APPROVED \| REJECTED }`           |
-| Analytics        | `GET /analytics/{overview,status,designations,shifts,leaves,fairness}`    |
-
-Mutations (POST/PUT/DELETE) on most resources require **ADMIN**.
-
----
-
-## 🧑‍💻 Local development (without Docker)
-
-If you'd rather run things on the host:
+Install Docker Desktop or Docker Engine, then run:
 
 ```bash
-# 1. Postgres
-docker run -d --name pg -e POSTGRES_USER=roster -e POSTGRES_PASSWORD=rosterpass -e POSTGRES_DB=roster_db -p 5432:5432 postgres:16-alpine
+docker compose up -d --build
+```
 
-# 2. Backend
+Open:
+
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:3001/api`
+- PostgreSQL: `localhost:5432`
+
+The backend container runs:
+
+```bash
+npx prisma db push --accept-data-loss --skip-generate
+node dist/main.js
+```
+
+That means the database schema is synced automatically when the backend starts.
+
+## Clean Database Reset
+
+To remove all database data and rebuild from scratch:
+
+```bash
+docker compose down -v
+docker compose up -d --build
+```
+
+The `-v` flag removes the PostgreSQL Docker volume.
+
+## Local Development Without Docker
+
+### 1. Start PostgreSQL
+
+```bash
+docker run -d \
+  --name roster_postgres_dev \
+  -e POSTGRES_USER=roster \
+  -e POSTGRES_PASSWORD=rosterpass \
+  -e POSTGRES_DB=roster_db \
+  -p 5432:5432 \
+  postgres:16-alpine
+```
+
+### 2. Start Backend
+
+```bash
 cd backend
 npm install
-export DATABASE_URL="postgresql://roster:rosterpass@localhost:5432/roster_db?schema=public"
-export JWT_SECRET="dev"
+```
+
+PowerShell:
+
+```powershell
+$env:DATABASE_URL="postgresql://roster:rosterpass@localhost:5432/roster_db?schema=public"
+$env:JWT_SECRET="change-this-in-development"
+$env:JWT_EXPIRES_IN="7d"
+$env:CORS_ORIGIN="http://localhost:3000"
+npx prisma generate
 npx prisma db push
 npm run start:dev
+```
 
-# 3. Frontend (new terminal)
+Bash:
+
+```bash
+export DATABASE_URL="postgresql://roster:rosterpass@localhost:5432/roster_db?schema=public"
+export JWT_SECRET="change-this-in-development"
+export JWT_EXPIRES_IN="7d"
+export CORS_ORIGIN="http://localhost:3000"
+npx prisma generate
+npx prisma db push
+npm run start:dev
+```
+
+Backend runs at:
+
+```text
+http://localhost:3001/api
+```
+
+### 3. Start Frontend
+
+```bash
 cd frontend
 npm install
-echo "NEXT_PUBLIC_API_URL=http://localhost:3001" > .env.local
 npm run dev
 ```
 
----
+Frontend runs at:
 
-## ⚙️ Configuration
-
-All wiring is in `docker-compose.yml`. Key envs:
-
-| Variable               | Default                                  | Notes                                      |
-| ---------------------- | ---------------------------------------- | ------------------------------------------ |
-| `DATABASE_URL`         | `postgresql://roster:rosterpass@…`       | Backend's DB connection                    |
-| `JWT_SECRET`           | `change-this-jwt-secret-in-production…`  | **Change for production**                  |
-| `JWT_EXPIRES_IN`       | `7d`                                     | JWT lifetime                               |
-| `CORS_ORIGIN`          | `http://localhost:3000`                  | Comma-separated allowed origins            |
-| `NEXT_PUBLIC_API_URL`  | `http://localhost:3001`                  | What the browser calls (set at build time) |
-
----
-
-## 🗂️ Project layout
-
-```
-roster-system/
-├── docker-compose.yml
-├── README.md
-├── backend/
-│   ├── Dockerfile
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── nest-cli.json
-│   ├── prisma/
-│   │   └── schema.prisma     ← 13 models, full enum set
-│   └── src/
-│       ├── main.ts, app.module.ts
-│       ├── prisma/           ← Prisma service (global)
-│       ├── auth/             ← JWT strategy, guards, decorators
-│       ├── organizations/, projects/, locations/, departments/,
-│       │   designations/, employees/, shifts/   ← CRUD modules
-│       ├── rosters/          ← Auto-gen engine + coverage
-│       ├── leaves/           ← Apply / approve / cascade-cancel
-│       └── analytics/        ← Aggregations for charts
-└── frontend/
-    ├── Dockerfile
-    ├── next.config.js, tailwind.config.ts, tsconfig.json, postcss.config.js
-    └── src/
-        ├── lib/              ← api.ts (fetch + JWT), auth-context.tsx, utils.ts
-        ├── components/       ← sidebar, topbar, ui/* (button, card, dialog, …)
-        └── app/
-            ├── layout.tsx, page.tsx
-            ├── login/, register/
-            ├── admin/        ← layout + 10 admin pages
-            └── employee/     ← layout + 4 employee pages
+```text
+http://localhost:3000
 ```
 
----
+## Environment Variables
 
-## 🧯 Troubleshooting
+### Backend
 
-**"Cannot connect to backend" on frontend**
-The frontend talks to `NEXT_PUBLIC_API_URL` from your *browser*. With docker-compose it's set to `http://localhost:3001`, which works because port 3001 is exposed on the host. If you change ports, rebuild the frontend image.
+| Variable | Purpose | Example |
+|---|---|---|
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://roster:rosterpass@postgres:5432/roster_db?schema=public` |
+| `JWT_SECRET` | JWT signing secret | `change-this-in-production` |
+| `JWT_EXPIRES_IN` | Token lifetime | `7d` |
+| `PORT` | Backend port | `3001` |
+| `CORS_ORIGIN` | Allowed frontend origins | `http://localhost:3000` |
+| `ORG_CODE_PREFIX` | Organization code prefix | `ORG` |
+| `ORG_CODE_PAD` | Organization code padding | `4` |
+| `PROJECT_CODE_PREFIX` | Project code prefix | `PROJ` |
+| `PROJECT_CODE_PAD` | Project code padding | `4` |
 
-**Backend keeps restarting**
-Check `docker compose logs backend`. The backend waits for Postgres to pass its healthcheck, then runs `prisma db push` before starting the API. On slow hardware, Postgres may take longer than usual to become healthy.
+### Frontend
 
-**Reset the database**
+| Variable | Purpose | Example |
+|---|---|---|
+| `NEXT_PUBLIC_API_URL` | Browser API base URL | `http://localhost:3001` |
+
+## Docker Services
+
+### `postgres`
+
+- Image: `postgres:16-alpine`
+- Port: `5432`
+- Healthcheck enabled.
+- Data stored in named volume `postgres_data`.
+
+### `backend`
+
+- Builds from `backend/Dockerfile`.
+- Port: `3001`.
+- Depends on healthy Postgres.
+- Runs Prisma schema sync on startup.
+
+### `frontend`
+
+- Builds from `frontend/Dockerfile`.
+- Port: `3000`.
+- Uses `NEXT_PUBLIC_API_URL` at build time.
+
+## Useful Commands
+
 ```bash
-docker compose down -v   # the -v drops the database volume
+# Start all services
+docker compose up -d --build
+
+# View logs
+docker compose logs -f backend
+docker compose logs -f frontend
+
+# Stop services
+docker compose down
+
+# Stop and remove database volume
+docker compose down -v
+
+# Rebuild backend only
+docker compose up -d --build backend
+
+# Rebuild frontend only
+docker compose up -d --build frontend
+```
+
+## Backend Build And Prisma
+
+```bash
+cd backend
+npm run build
+npx prisma generate
+npx prisma validate
+```
+
+When running Prisma locally, set `DATABASE_URL` first.
+
+## Frontend Build
+
+```bash
+cd frontend
+npm run build
+```
+
+## API Overview
+
+All backend routes are prefixed with `/api`.
+
+Authentication uses:
+
+```text
+Authorization: Bearer <token>
+```
+
+High-level modules:
+
+| Module | Purpose |
+|---|---|
+| `/auth` | Login, register, current user, password flows |
+| `/organizations` | Organization CRUD |
+| `/projects` | Project CRUD and employee assignment |
+| `/locations` | Location CRUD and workforce views |
+| `/departments` | Department CRUD |
+| `/designations` | Designation CRUD |
+| `/employees` | Employee CRUD, filters, bulk upload |
+| `/shifts` | Shift CRUD |
+| `/roster-policies` | Location and all-location roster policy configuration |
+| `/roster` | Roster preview, publish, export, coverage, employee roster |
+| `/leaves` | Leave requests and approvals |
+| `/analytics` | Dashboard and operational analytics |
+| `/audit-logs` | Admin audit log review |
+
+## Deployment With GitHub Actions
+
+The repository includes `.github/workflows/deploy.yaml`.
+
+The workflow:
+
+1. Runs backend build.
+2. Runs frontend build.
+3. SSHs into the server using password authentication.
+4. Pulls latest code using token-based Git authentication.
+5. Runs:
+
+```bash
 docker compose up -d --build
 ```
 
-**Port conflicts on 3000/3001/5432**
-Edit the `ports:` mappings in `docker-compose.yml`.
+### Required GitHub Secrets
 
----
+| Secret | Purpose |
+|---|---|
+| `SERVER_HOST` | Server hostname or IP |
+| `SERVER_PORT` | SSH port, usually `22` |
+| `SERVER_USER` | SSH username |
+| `SERVER_PASSWORD` | SSH password |
+| `DEPLOY_PATH` | Absolute path to the repo on the server |
+| `GIT_TOKEN` | GitHub token with repository read access |
+| `GIT_REPO` | Repository slug, for example `owner/repo` |
+| `DEPLOY_BRANCH` | Branch to deploy, for example `main` |
 
-## 📋 What the PRD called for vs. what's here
+### Server Requirements
 
-This is a substantial first cut covering the **core 10 modules** with shallower coverage of each:
+The server should have:
 
-✅ Organization / Project / Location / Department / Designation management
-✅ Employee management with lifecycle states
-✅ Shift configuration with type, distribution, designation requirements
-✅ **Intelligent auto-rostering with fairness scoring**
-✅ Leave application & approval with roster cascade
-✅ Coverage view (shift staffing per day)
-✅ Admin analytics (workforce, fairness, shift distribution)
-✅ Employee self-service portal (calendar, leaves, profile)
-✅ JWT auth with Admin/Employee roles
+- Docker installed.
+- Docker Compose plugin installed.
+- Git installed.
+- The repo already cloned at `DEPLOY_PATH`, or an empty directory ready for the workflow to clone into.
+- SSH password login enabled for the deployment user.
 
-🔜 Not yet implemented (from PRD): swap workflow, notifications/SMS/email, geo-based assignment, predictive fatigue detection, full audit log, bulk CSV upload UI, biometric attendance sync, AI/ML forecasting, multi-tenant org isolation. The data model already supports many of these (e.g. `Notification`, `RosterEntry.status = SWAPPED`) — they need UI and service wiring.
+## Production Notes
 
----
+- Change `JWT_SECRET` before production use.
+- Use HTTPS and a real domain for the frontend.
+- Set `CORS_ORIGIN` to the production frontend URL.
+- Keep database backups before running schema changes.
+- Review `docker-compose.yml` before using `--accept-data-loss` in a production database.
+- Prefer a reverse proxy such as Nginx or Caddy in front of the containers for TLS.
 
-Built as a starting point for a real enterprise workforce platform — extend confidently.
+## Troubleshooting
+
+### Frontend cannot reach backend
+
+Check that `NEXT_PUBLIC_API_URL` points to the backend URL reachable from the browser.
+
+For Docker Compose local usage:
+
+```text
+NEXT_PUBLIC_API_URL=http://localhost:3001
+```
+
+### Backend cannot connect to database
+
+Check:
+
+```bash
+docker compose ps
+docker compose logs postgres
+docker compose logs backend
+```
+
+Confirm `DATABASE_URL` points to `postgres` inside Docker Compose, not `localhost`.
+
+### Prisma validation fails locally
+
+Set `DATABASE_URL` first:
+
+```powershell
+$env:DATABASE_URL="postgresql://roster:rosterpass@localhost:5432/roster_db?schema=public"
+npx prisma validate
+```
+
+### Need a completely clean environment
+
+```bash
+docker compose down -v
+docker compose up -d --build
+```
+
+## Demo Notes
+
+For the current demo database, the project is `DC-DR-O&M` and the staffed location name is stored as `Banglore`.
+
+The executive demo guide is available at:
+
+```text
+docs/EXECUTIVE_DEMO_GUIDE.md
+```
+
+## License
+
+Private/internal project unless a license file is added.
