@@ -9,7 +9,11 @@ async function bootstrap() {
   app.use(urlencoded({ extended: true, limit: '5mb' }));
   app.setGlobalPrefix('api');
   app.enableCors({
-    origin: process.env.CORS_ORIGIN?.split(',') ?? ['http://localhost:3000'],
+    origin: process.env.CORS_ORIGIN?.split(',').map((origin) => origin.trim()) ?? [
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+      'http://82.29.162.36:3000',
+    ],
     credentials: true,
   });
   app.useGlobalPipes(

@@ -1,4 +1,30 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const CONFIGURED_API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+}
+
+function getApiUrl(): string {
+  const configuredApiUrl = CONFIGURED_API_URL.replace(/\/+$/, '');
+
+  if (typeof window === 'undefined') {
+    return configuredApiUrl;
+  }
+
+  try {
+    const configuredUrl = new URL(configuredApiUrl);
+    const pageIsLocal = isLoopbackHost(window.location.hostname);
+    const apiIsLocal = isLoopbackHost(configuredUrl.hostname);
+
+    if (apiIsLocal && !pageIsLocal) {
+      return `${window.location.protocol}//${window.location.hostname}:3001`;
+    }
+  } catch {
+    return `${window.location.protocol}//${window.location.hostname}:3001`;
+  }
+
+  return configuredApiUrl;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -29,7 +55,7 @@ export async function apiFetch<T = any>(path: string, init: RequestInit = {}): P
   };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const res = await fetch(`${API_URL}/api${path}`, {
+  const res = await fetch(`${getApiUrl()}/api${path}`, {
     ...init,
     headers,
     cache: 'no-store',
@@ -50,7 +76,7 @@ export async function apiBlob(path: string): Promise<Blob> {
   const token = getToken();
   const headers: Record<string, string> = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_URL}/api${path}`, { headers, cache: 'no-store' });
+  const res = await fetch(`${getApiUrl()}/api${path}`, { headers, cache: 'no-store' });
   if (!res.ok) throw new ApiError(res.statusText, res.status, await res.text());
   return res.blob();
 }
