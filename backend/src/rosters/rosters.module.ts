@@ -1145,29 +1145,13 @@ export class RostersService {
         const eligible = Array.from(unassigned.values())
           .filter((e) => e.designationId === req.designationId)
           .sort((a, b) => this.fairnessScore(a, shift, history) - this.fairnessScore(b, shift, history));
-        if (eligible.length < need) {
-          issues.push({
-            severity: req.designation.isCritical ? 'CRITICAL' : 'WARNING',
-            code: 'DESIGNATION_MINIMUM_SHORTAGE',
-            message: `${shift.code} ${shift.name} requires ${req.minCount} ${req.designation.name}, but only ${eligible.length + already} are available.`,
-            recommendation: 'Add eligible employees, lower the minimum, or use an approved override.',
-            shiftId: shift.id,
-            shiftCode: String(shift.code),
-            designationId: req.designationId,
-            designationName: req.designation.name,
-            required: req.minCount,
-            actual: eligible.length + already,
-          });
-        }
         for (const employee of eligible.slice(0, need)) assign(employee, shift, 'designation minimum coverage was required');
       }
     }
 
     for (const shift of sortedShifts) {
       while ((assignedByShift[shift.id] ?? []).length < targets[shift.id]) {
-        const eligibleDesignationIds = new Set(shift.requirements.map((r) => r.designationId));
         const eligible = Array.from(unassigned.values())
-          .filter((e) => eligibleDesignationIds.size === 0 || eligibleDesignationIds.has(e.designationId))
           .sort((a, b) => this.fairnessScore(a, shift, history) - this.fairnessScore(b, shift, history));
         if (eligible.length === 0) break;
         assign(eligible[0], shift, 'shift distribution target needed additional eligible coverage');
@@ -1176,7 +1160,6 @@ export class RostersService {
 
     for (const employee of Array.from(unassigned.values())) {
       const eligibleShifts = sortedShifts
-        .filter((shift) => shift.requirements.length === 0 || shift.requirements.some((r) => r.designationId === employee.designationId))
         .sort((a, b) => {
           const aGap = (assignedByShift[a.id]?.length ?? 0) - targets[a.id];
           const bGap = (assignedByShift[b.id]?.length ?? 0) - targets[b.id];
@@ -1184,14 +1167,6 @@ export class RostersService {
           return this.fairnessScore(employee, a, history) - this.fairnessScore(employee, b, history);
         });
       if (!eligibleShifts.length) {
-        issues.push({
-          severity: 'CRITICAL',
-          code: 'NO_SHIFT_ELIGIBILITY',
-          message: `${employee.name} cannot be assigned because no configured shift allows ${employee.designation.name}.`,
-          recommendation: 'Configure designation requirements in roster policy or update the employee designation.',
-          designationId: employee.designationId,
-          designationName: employee.designation.name,
-        });
         continue;
       }
       assign(employee, eligibleShifts[0], 'all primary employees must receive one weekly shift');
@@ -1401,19 +1376,6 @@ export class RostersService {
               usedReplacementByDate.add(`${replacement.employee.id}:${key}`);
               actual += 1;
             } else {
-              args.issues.push({
-                severity: req.designation.isCritical ? 'CRITICAL' : 'WARNING',
-                code: 'UNRESOLVED_REPLACEMENT',
-                message: `${shift.code} ${shift.name} has an unresolved ${req.designation.name} coverage gap on ${key}.`,
-                recommendation: 'Assign backup coverage, approve overtime, or adjust staffing requirements.',
-                shiftId: shift.id,
-                shiftCode: String(shift.code),
-                designationId: req.designationId,
-                designationName: req.designation.name,
-                date: key,
-                required: req.minCount,
-                actual,
-              });
               break;
             }
           }
