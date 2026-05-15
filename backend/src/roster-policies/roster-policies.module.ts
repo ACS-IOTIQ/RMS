@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Delete, Get, Injectable, Module,
 import { Type } from 'class-transformer';
 import { IsArray, IsBoolean, IsEnum, IsInt, IsNotEmpty, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
 import { CoverageMode, DayType, EmployeeStatus, RoundingPolicy, ShiftCode, UserRole, WeekStartDay } from '@prisma/client';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -408,32 +408,272 @@ export class RosterPoliciesService {
 
   async exportAllLocationPolicy(id: string, actor: any, res: Response) {
     const state = await this.multiLocationState(id);
-    const workbook = XLSX.utils.book_new();
-    const rows: Record<string, any>[] = [];
-    const cells = new Map((state.cells ?? []).map((cell: any) => [`${cell.locationId}:${cell.shiftId}:${cell.designationId}`, cell]));
+    const project = await this.prisma.project.findUnique({ where: { id: state.policy.projectId } });
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'RosterOps';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const matrixSheet = workbook.addWorksheet('All Locations Matrix', {
+      views: [{ state: 'frozen', xSplit: 1, ySplit: 5, topLeftCell: 'B6', activeCell: 'B6' }],
+      properties: { defaultRowHeight: 24 },
+    });
+    const validationSheet = workbook.addWorksheet('Validation Summary');
+    const detailSheet = workbook.addWorksheet('Detailed Data');
+
     const distribution = cleanDistribution(state.policy?.shiftDistributionJson);
-    for (const designation of state.designations) {
-      const row: Record<string, any> = { Designation: designation.name };
-      for (const location of state.locations) {
-        const shifts = (location.shifts ?? []).filter((shift: any) => Number(distribution[shift.code] ?? 0) > 0);
-        for (const shift of shifts) {
-          const cell = cells.get(`${location.id}:${shift.id}:${designation.id}`);
-          const prefix = `${location.name} ${this.shiftLabel(shift)}`;
-          row[`${prefix} Available`] = cell?.availableCount ?? 0;
-          row[`${prefix} Suggested`] = cell?.suggestedCount ?? 0;
-          row[`${prefix} Manual`] = cell?.manualCount ?? '';
-          row[`${prefix} Status`] = cell?.validationStatus ?? 'OK';
+    const cells = new Map((state.cells ?? []).map((cell: any) => [`${cell.locationId}:${cell.shiftId}:${cell.designationId}`, cell]));
+    const locations = state.locations.map((location: any) => ({
+      ...location,
+      matrixShifts: (location.shifts ?? [])
+        .filter((shift: any) => PROJECT_COVERAGE_SHIFT_CODES.includes(shift.code as ShiftCode) && Number(distribution[shift.code] ?? 0) > 0)
+        .sort((a: any, b: any) => String(a.code).localeCompare(String(b.code))),
+    }));
+    const totalColumns = 1 + locations.reduce((sum: number, location: any) => sum + Math.max(1, location.matrixShifts.length), 0);
+    const locationHeaderColors = ['DBEAFE', 'D1FAE5', 'EDE9FE', 'FEF3C7', 'FFE4E6', 'CFFAFE', 'ECFCCB', 'FAE8FF'];
+    const shiftHeaderColors: Record<string, string> = { A: 'E0F2FE', B: 'FEF3C7', C: 'EDE9FE' };
+    const statusColors: Record<string, string> = {
+      OK: 'FFFFFF',
+      INFO: 'DBEAFE',
+      WARNING: 'FEF3C7',
+      CRITICAL: 'FEE2E2',
+      OVERRIDDEN: 'DCFCE7',
+    };
+    const border: Partial<ExcelJS.Borders> = {
+      top: { style: 'thin', color: { argb: 'CBD5E1' } },
+      left: { style: 'thin', color: { argb: 'CBD5E1' } },
+      bottom: { style: 'thin', color: { argb: 'CBD5E1' } },
+      right: { style: 'thin', color: { argb: 'CBD5E1' } },
+    };
+    const setFill = (cell: ExcelJS.Cell, color: string) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: color } };
+    };
+    const styleRange = (fromRow: number, toRow: number, fromCol: number, toCol: number, options: {
+      fill?: string;
+      font?: Partial<ExcelJS.Font>;
+      alignment?: Partial<ExcelJS.Alignment>;
+    } = {}) => {
+      for (let row = fromRow; row <= toRow; row += 1) {
+        for (let col = fromCol; col <= toCol; col += 1) {
+          const cell = matrixSheet.getCell(row, col);
+          cell.border = border;
+          if (options.fill) setFill(cell, options.fill);
+          if (options.font) cell.font = options.font;
+          if (options.alignment) cell.alignment = options.alignment;
         }
       }
-      rows.push(row);
+    };
+
+    matrixSheet.mergeCells(1, 1, 1, totalColumns);
+    const titleCell = matrixSheet.getCell(1, 1);
+    titleCell.value = 'All Locations Roster Policy Matrix';
+    titleCell.font = { bold: true, size: 16, color: { argb: '0F172A' } };
+    titleCell.alignment = { vertical: 'middle', horizontal: 'left' };
+    matrixSheet.getRow(1).height = 30;
+
+    matrixSheet.mergeCells(2, 1, 2, totalColumns);
+    const metaCell = matrixSheet.getCell(2, 1);
+    metaCell.value = `Project: ${project?.name ?? state.policy.projectId}    Daily Headcount: ${state.policy.requiredDailyHeadcount}    Distribution: Morning ${distribution.A ?? 0}% / Afternoon ${distribution.B ?? 0}% / Night ${distribution.C ?? 0}%    Generated: ${new Date().toLocaleString('en-IN')}`;
+    metaCell.font = { size: 10, color: { argb: '475569' } };
+    metaCell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+    matrixSheet.getRow(2).height = 24;
+
+    matrixSheet.getColumn(1).width = 32;
+    for (let col = 2; col <= totalColumns; col += 1) matrixSheet.getColumn(col).width = 14;
+
+    matrixSheet.mergeCells(4, 1, 5, 1);
+    const designationHeader = matrixSheet.getCell(4, 1);
+    designationHeader.value = 'Designation';
+    designationHeader.font = { bold: true, color: { argb: '0F172A' } };
+    designationHeader.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    setFill(designationHeader, 'F8FAFC');
+    designationHeader.border = border;
+
+    let col = 2;
+    const locationRanges: { location: any; startCol: number; endCol: number; shifts: any[]; targets: Record<string, number> }[] = [];
+    for (const [locationIndex, location] of locations.entries()) {
+      const shifts = location.matrixShifts;
+      const startCol = col;
+      const endCol = col + Math.max(1, shifts.length) - 1;
+      locationRanges.push({
+        location,
+        startCol,
+        endCol,
+        shifts,
+        targets: this.calculateDailyShiftTargets(shifts, state.policy),
+      });
+      if (startCol < endCol) matrixSheet.mergeCells(4, startCol, 4, endCol);
+      const locationCell = matrixSheet.getCell(4, startCol);
+      locationCell.value = String(location.name ?? '').toUpperCase();
+      locationCell.font = { bold: true, color: { argb: '1E293B' } };
+      locationCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      setFill(locationCell, locationHeaderColors[locationIndex % locationHeaderColors.length]);
+      styleRange(4, 4, startCol, endCol, {
+        fill: locationHeaderColors[locationIndex % locationHeaderColors.length],
+        font: { bold: true, color: { argb: '1E293B' } },
+        alignment: { vertical: 'middle', horizontal: 'center', wrapText: true },
+      });
+
+      if (!shifts.length) {
+        const shiftCell = matrixSheet.getCell(5, col);
+        shiftCell.value = 'No shifts';
+        shiftCell.font = { bold: true, color: { argb: '64748B' } };
+        shiftCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        shiftCell.border = border;
+        setFill(shiftCell, 'F1F5F9');
+        col += 1;
+        continue;
+      }
+
+      for (const shift of shifts) {
+        const shiftCell = matrixSheet.getCell(5, col);
+        shiftCell.value = this.shiftLabel(shift);
+        shiftCell.font = { bold: true, color: { argb: '334155' } };
+        shiftCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        shiftCell.border = border;
+        setFill(shiftCell, shiftHeaderColors[String(shift.code)] ?? 'F1F5F9');
+        col += 1;
+      }
     }
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'All Locations Matrix');
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet((state.validationSummary as any)?.issues ?? []), 'Validation');
-    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
-    await this.audit('MULTI_LOCATION_POLICY_EXPORT', id, actor, { rows: rows.length }, 'MultiLocationRosterPolicy');
+    matrixSheet.getRow(4).height = 28;
+    matrixSheet.getRow(5).height = 28;
+
+    const firstDataRow = 6;
+    for (const [designationIndex, designation] of state.designations.entries()) {
+      const rowNumber = firstDataRow + designationIndex;
+      const row = matrixSheet.getRow(rowNumber);
+      row.height = 24;
+      const designationCell = matrixSheet.getCell(rowNumber, 1);
+      designationCell.value = designation.name;
+      designationCell.font = { bold: true, color: { argb: '0F172A' } };
+      designationCell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+      designationCell.border = border;
+      setFill(designationCell, designationIndex % 2 === 0 ? 'FFFFFF' : 'F8FAFC');
+
+      for (const range of locationRanges) {
+        let shiftCol = range.startCol;
+        for (const shift of range.shifts) {
+          const matrixCell = matrixSheet.getCell(rowNumber, shiftCol);
+          const sourceCell = cells.get(`${range.location.id}:${shift.id}:${designation.id}`);
+          const status = sourceCell?.manualCount !== null && sourceCell?.manualCount !== undefined
+            ? 'OVERRIDDEN'
+            : String(sourceCell?.validationStatus ?? 'OK');
+          matrixCell.value = effectiveCount(sourceCell);
+          matrixCell.alignment = { vertical: 'middle', horizontal: 'center' };
+          matrixCell.border = status === 'OVERRIDDEN'
+            ? { ...border, top: { style: 'medium', color: { argb: '16A34A' } }, bottom: { style: 'medium', color: { argb: '16A34A' } } }
+            : border;
+          setFill(matrixCell, statusColors[status] ?? 'FFFFFF');
+          shiftCol += 1;
+        }
+      }
+    }
+
+    const shiftTotalsRow = firstDataRow + state.designations.length;
+    const locationTotalsRow = shiftTotalsRow + 1;
+    matrixSheet.getRow(shiftTotalsRow).height = 34;
+    matrixSheet.getRow(locationTotalsRow).height = 36;
+    matrixSheet.getCell(shiftTotalsRow, 1).value = 'Shift Totals';
+    matrixSheet.getCell(locationTotalsRow, 1).value = 'Location Totals';
+    styleRange(shiftTotalsRow, locationTotalsRow, 1, 1, {
+      fill: 'E2E8F0',
+      font: { bold: true, color: { argb: '0F172A' } },
+      alignment: { vertical: 'middle', horizontal: 'left' },
+    });
+
+    for (const range of locationRanges) {
+      let plannedLocationTotal = 0;
+      let policyLocationTarget = 0;
+      let shiftCol = range.startCol;
+      for (const shift of range.shifts) {
+        const shiftTotal = state.designations.reduce((sum: number, designation: any) => {
+          return sum + effectiveCount(cells.get(`${range.location.id}:${shift.id}:${designation.id}`));
+        }, 0);
+        const target = Number(range.targets[shift.id] ?? 0);
+        plannedLocationTotal += shiftTotal;
+        policyLocationTarget += target;
+        const totalCell = matrixSheet.getCell(shiftTotalsRow, shiftCol);
+        totalCell.value = `${shiftTotal}\nTarget ${target}`;
+        totalCell.font = { bold: true, color: { argb: '0F172A' } };
+        totalCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        totalCell.border = border;
+        setFill(totalCell, shiftTotal === target ? (shiftHeaderColors[String(shift.code)] ?? 'F8FAFC') : 'FEF3C7');
+        shiftCol += 1;
+      }
+      if (range.startCol < range.endCol) matrixSheet.mergeCells(locationTotalsRow, range.startCol, locationTotalsRow, range.endCol);
+      const totalCell = matrixSheet.getCell(locationTotalsRow, range.startCol);
+      totalCell.value = `Total ${plannedLocationTotal}\nPolicy Target ${policyLocationTarget}`;
+      totalCell.font = { bold: true, color: { argb: plannedLocationTotal === policyLocationTarget ? '0F172A' : '991B1B' } };
+      totalCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      totalCell.border = border;
+      setFill(totalCell, plannedLocationTotal === policyLocationTarget ? 'F8FAFC' : 'FEE2E2');
+      styleRange(locationTotalsRow, locationTotalsRow, range.startCol, range.endCol, {
+        fill: plannedLocationTotal === policyLocationTarget ? 'F8FAFC' : 'FEE2E2',
+        font: { bold: true, color: { argb: plannedLocationTotal === policyLocationTarget ? '0F172A' : '991B1B' } },
+        alignment: { vertical: 'middle', horizontal: 'center', wrapText: true },
+      });
+    }
+
+    matrixSheet.autoFilter = {
+      from: { row: 5, column: 1 },
+      to: { row: shiftTotalsRow - 1, column: totalColumns },
+    };
+
+    const issues = (state.validationSummary as any)?.issues ?? [];
+    validationSheet.columns = [
+      { header: 'Severity', key: 'severity', width: 14 },
+      { header: 'Code', key: 'code', width: 32 },
+      { header: 'Message', key: 'message', width: 80 },
+      { header: 'Location', key: 'locationName', width: 24 },
+      { header: 'Shift', key: 'shiftCode', width: 12 },
+      { header: 'Designation', key: 'designationName', width: 32 },
+      { header: 'Required', key: 'required', width: 12 },
+      { header: 'Actual', key: 'actual', width: 12 },
+    ];
+    validationSheet.addRows(issues.length ? issues : [{ severity: 'OK', code: 'NO_ISSUES', message: 'No validation issues found.' }]);
+    this.formatSimpleWorksheet(validationSheet, 'Validation Summary');
+
+    detailSheet.columns = [
+      { header: 'Location', key: 'location', width: 24 },
+      { header: 'Shift', key: 'shift', width: 18 },
+      { header: 'Designation', key: 'designation', width: 32 },
+      { header: 'Available', key: 'available', width: 12 },
+      { header: 'Suggested', key: 'suggested', width: 12 },
+      { header: 'Manual', key: 'manual', width: 12 },
+      { header: 'Effective', key: 'effective', width: 12 },
+      { header: 'Status', key: 'status', width: 14 },
+      { header: 'Message', key: 'message', width: 60 },
+    ];
+    for (const location of locations) {
+      for (const shift of location.matrixShifts) {
+        for (const designation of state.designations) {
+          const cell = cells.get(`${location.id}:${shift.id}:${designation.id}`);
+          detailSheet.addRow({
+            location: location.name,
+            shift: this.shiftLabel(shift),
+            designation: designation.name,
+            available: cell?.availableCount ?? 0,
+            suggested: cell?.suggestedCount ?? 0,
+            manual: cell?.manualCount ?? '',
+            effective: effectiveCount(cell),
+            status: cell?.manualCount !== null && cell?.manualCount !== undefined ? 'OVERRIDDEN' : cell?.validationStatus ?? 'OK',
+            message: cell?.validationMessage ?? '',
+          });
+        }
+      }
+    }
+    this.formatSimpleWorksheet(detailSheet, 'Detailed Data');
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    await this.audit('MULTI_LOCATION_POLICY_EXPORT', id, actor, {
+      rows: state.designations.length,
+      locations: locations.length,
+      columns: totalColumns,
+      issues: issues.length,
+    }, 'MultiLocationRosterPolicy');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="all-locations-policy-${state.policy.projectId}.xlsx"`);
-    res.send(buffer);
+    res.send(Buffer.from(buffer));
   }
 
   private policyData(dto: RosterPolicyDto, organizationId: string, projectId: string, locationId: string) {
@@ -1470,6 +1710,52 @@ export class RosterPoliciesService {
     if (code === 'C') return 'Night';
     if (code === 'G') return 'General';
     return shift?.name ?? code;
+  }
+
+  private formatSimpleWorksheet(sheet: ExcelJS.Worksheet, title: string) {
+    sheet.views = [{ state: 'frozen', ySplit: 1, topLeftCell: 'A2', activeCell: 'A2' }];
+    sheet.getRow(1).height = 24;
+    const border: Partial<ExcelJS.Borders> = {
+      top: { style: 'thin', color: { argb: 'CBD5E1' } },
+      left: { style: 'thin', color: { argb: 'CBD5E1' } },
+      bottom: { style: 'thin', color: { argb: 'CBD5E1' } },
+      right: { style: 'thin', color: { argb: 'CBD5E1' } },
+    };
+    const statusColors: Record<string, string> = {
+      OK: 'FFFFFF',
+      INFO: 'DBEAFE',
+      WARNING: 'FEF3C7',
+      CRITICAL: 'FEE2E2',
+      OVERRIDDEN: 'DCFCE7',
+      NO_ISSUES: 'DCFCE7',
+    };
+    const severityColumn = sheet.columns.findIndex((column) => column.key === 'severity') + 1;
+    const statusColumn = sheet.columns.findIndex((column) => column.key === 'status') + 1;
+
+    sheet.getRow(1).eachCell((cell) => {
+      cell.font = { bold: true, color: { argb: '0F172A' } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'E2E8F0' } };
+      cell.border = border;
+    });
+    sheet.eachRow((row, rowNumber) => {
+      if (rowNumber > 1) row.height = 22;
+      row.eachCell((cell) => {
+        cell.alignment = { vertical: 'middle', horizontal: rowNumber === 1 ? 'center' : 'left', wrapText: true };
+        cell.border = border;
+      });
+      const statusCell = severityColumn > 0 ? row.getCell(severityColumn) : statusColumn > 0 ? row.getCell(statusColumn) : null;
+      const status = String(statusCell?.value ?? '').toUpperCase();
+      if (statusCell && statusColors[status]) {
+        statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: statusColors[status] } };
+        statusCell.font = { bold: true, color: { argb: status === 'CRITICAL' ? '991B1B' : '0F172A' } };
+      }
+    });
+    sheet.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: Math.max(1, sheet.rowCount), column: Math.max(1, sheet.columnCount) },
+    };
+    sheet.name = title.slice(0, 31);
   }
 
   private include() {

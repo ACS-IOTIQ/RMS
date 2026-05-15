@@ -205,53 +205,81 @@ export default function RosterPage() {
       <Topbar title="Weekly Roster" subtitle={`${selectedLocation?.name ?? 'Select location'} / ${weekStart} to ${weekEnd}`} />
       <main className="space-y-4 p-3 md:p-5">
         <Card className="rounded-lg">
-          <CardContent className="p-3 md:p-4">
-            <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-end 2xl:justify-between">
-              <div className="grid flex-1 gap-3 md:grid-cols-2 xl:grid-cols-[1.2fr_1.1fr_.8fr_1fr]">
-                <div className="space-y-1.5">
-                  <Label>Project</Label>
-                  <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-                    {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-                  </Select>
+          <CardContent className="p-4 md:p-5">
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(270px,320px)]">
+              <div className="space-y-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <div className="text-sm font-semibold">Roster setup</div>
+                    <div className="text-xs text-muted-foreground">{weekStart} to {weekEnd}</div>
+                  </div>
+                  <Badge variant={hasCritical ? 'destructive' : rosterWeek ? 'success' : 'outline'}>
+                    {hasCritical ? 'Action required' : rosterWeek ? 'Preview ready' : 'No preview'}
+                  </Badge>
                 </div>
-                <div className="space-y-1.5">
-                  <Label>Location</Label>
-                  <Select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
-                    {locations.map((location) => <option key={location.id} value={location.id}>{location.name} ({location._count?.employees ?? 0})</option>)}
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Week start</Label>
-                  <Input type="date" value={weekStart} onChange={(e) => setWeekStart(e.target.value)} />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>View</Label>
-                  <Select value={viewMode} onChange={(e) => setViewMode(e.target.value)}>
-                    {viewModes.map((mode) => <option key={mode}>{mode}</option>)}
-                  </Select>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[1.2fr_1.1fr_.8fr_1fr]">
+                  <div className="space-y-1.5">
+                    <Label>Project</Label>
+                    <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+                      {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Location</Label>
+                    <Select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
+                      {locations.map((location) => <option key={location.id} value={location.id}>{location.name} ({location._count?.employees ?? 0})</option>)}
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Week start</Label>
+                    <Input type="date" value={weekStart} onChange={(e) => setWeekStart(e.target.value)} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>View</Label>
+                    <Select value={viewMode} onChange={(e) => setViewMode(e.target.value)}>
+                      {viewModes.map((mode) => <option key={mode}>{mode}</option>)}
+                    </Select>
+                  </div>
                 </div>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <Button onClick={previewRoster} disabled={loading}>
-                  {loading ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1.5 h-4 w-4" />}
-                  Preview
-                </Button>
-                <Button variant="outline" onClick={regenerateRoster}><RotateCcw className="mr-1.5 h-4 w-4" />Regenerate</Button>
-                <Button variant="outline" onClick={exportRoster}><Download className="mr-1.5 h-4 w-4" />Export</Button>
-                <Button variant="outline" onClick={() => setOverrideOpen(true)} disabled={!rosterWeek?.id}><ShieldAlert className="mr-1.5 h-4 w-4" />Override</Button>
-                <Button onClick={publishRoster} disabled={!rosterWeek?.id || publishing || hasCritical}>
-                  {publishing ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-1.5 h-4 w-4" />}
-                  Publish
-                </Button>
+
+              <div className="border-t pt-4 lg:border-l lg:border-t-0 lg:pl-5 lg:pt-0">
+                <div className="mb-3">
+                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Workflow</div>
+                  <div className="text-sm font-semibold">Generate and publish</div>
+                </div>
+                <div className="space-y-2">
+                  <Button className="h-10 w-full justify-start" onClick={previewRoster} disabled={loading}>
+                    {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
+                    Preview roster
+                  </Button>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                    <Button className="h-10 justify-start" variant="outline" onClick={regenerateRoster}>
+                      <RotateCcw className="mr-2 h-4 w-4" />Regenerate
+                    </Button>
+                    <Button className="h-10 justify-start" variant="outline" onClick={exportRoster}>
+                      <Download className="mr-2 h-4 w-4" />Export
+                    </Button>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                    <Button className="h-10 justify-start" variant="outline" onClick={() => setOverrideOpen(true)} disabled={!rosterWeek?.id}>
+                      <ShieldAlert className="mr-2 h-4 w-4" />Override
+                    </Button>
+                    <Button className="h-10 justify-start" onClick={publishRoster} disabled={!rosterWeek?.id || publishing || hasCritical}>
+                      {publishing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
+                      Publish
+                    </Button>
+                  </div>
+                </div>
               </div>
             </div>
           </CardContent>
         </Card>
 
         {rosterWeek && (
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
             {summaryCards.map(([label, value]) => (
-              <div key={label} className="rounded-lg border bg-background px-3 py-2">
+              <div key={label} className="rounded-lg border bg-background px-4 py-3">
                 <div className="text-[11px] uppercase text-muted-foreground">{label}</div>
                 <div className="mt-1 text-xl font-semibold">{value}</div>
               </div>
