@@ -31,6 +31,12 @@ const empNav = [
   { href: '/employee/profile', label: 'Profile', icon: User },
 ];
 
+function isRouteActive(pathname: string, href: string) {
+  if (pathname === href) return true;
+  if (href === '/admin' || href === '/employee') return false;
+  return pathname.startsWith(`${href}/`);
+}
+
 export function Sidebar({
   role,
   collapsed,
@@ -84,7 +90,7 @@ export function Sidebar({
 
       <nav className={cn('flex-1 overflow-y-auto p-3 space-y-1', collapsed && 'px-2')}>
         {nav.map((item) => {
-          const active = pathname === item.href || (item.href !== '/admin' && item.href !== '/employee' && pathname.startsWith(item.href));
+          const active = isRouteActive(pathname, item.href);
           const Icon = item.icon;
           return (
             <Link

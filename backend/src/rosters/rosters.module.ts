@@ -955,13 +955,11 @@ export class RostersService {
       });
     }
 
-    const minByShift: Record<string, number> = {};
     const dailyTargets: Record<string, number> = {};
     const rawRows = operationalShifts.map((shift) => {
       const pct = Number((distribution as any)[shift.code] ?? 0);
       const raw = distributionTotal > 0 ? (policy.requiredDailyHeadcount * pct) / distributionTotal : 0;
       const minRequired = shift.requirements.reduce((sum, r) => sum + Number(r.minCount ?? 0), 0);
-      minByShift[shift.id] = minRequired;
       return {
         shift,
         shiftId: shift.id,
@@ -978,7 +976,7 @@ export class RostersService {
     });
 
     if (policy.roundingPolicy === RoundingPolicy.LARGEST_REMAINDER) {
-      for (const row of rawRows) dailyTargets[row.shiftId] = Math.max(row.floor, row.minRequired);
+      for (const row of rawRows) dailyTargets[row.shiftId] = row.floor;
       let total = Object.values(dailyTargets).reduce((a, b) => a + b, 0);
       const remainderOrder = [...rawRows].sort((a, b) => {
         if (b.remainder !== a.remainder) return b.remainder - a.remainder;
@@ -993,7 +991,7 @@ export class RostersService {
         cursor += 1;
       }
     } else {
-      for (const row of rawRows) dailyTargets[row.shiftId] = Math.max(row.rounded, row.minRequired);
+      for (const row of rawRows) dailyTargets[row.shiftId] = row.rounded;
     }
 
     let total = Object.values(dailyTargets).reduce((a, b) => a + b, 0);
@@ -1005,7 +1003,7 @@ export class RostersService {
       return String(b.code).localeCompare(String(a.code));
     });
     while (total > policy.requiredDailyHeadcount) {
-      const candidate = downOrder.find((s) => dailyTargets[s.id] > minByShift[s.id]);
+      const candidate = downOrder.find((s) => dailyTargets[s.id] > 0);
       if (!candidate) break;
       dailyTargets[candidate.id] -= 1;
       total -= 1;
@@ -1022,17 +1020,6 @@ export class RostersService {
       const candidate = upOrder[(policy.requiredDailyHeadcount - total - 1) % upOrder.length];
       dailyTargets[candidate.id] += 1;
       total += 1;
-    }
-
-    if (total > policy.requiredDailyHeadcount) {
-      issues.push({
-        severity: 'CRITICAL',
-        code: 'MINIMUMS_EXCEED_WORKFORCE',
-        message: `Designation minimums require ${total} daily employees, but policy daily headcount is ${policy.requiredDailyHeadcount}.`,
-        recommendation: 'Reduce designation minimums, increase daily headcount, or approve a critical override.',
-        required: total,
-        actual: policy.requiredDailyHeadcount,
-      });
     }
 
     const targets: Record<string, number> = {};
@@ -1279,32 +1266,6 @@ export class RostersService {
           extra.entryType = RosterEntryType.GENERAL;
           extra.notes = 'General/Buffer capacity';
         }
-        const actual = working.filter((entry) => entry.status === RosterStatus.SCHEDULED).length;
-        if (actual < target) {
-          issues.push({
-            severity: 'CRITICAL',
-            code: 'DAILY_SHIFT_HEADCOUNT_SHORTAGE',
-            message: `${working[0]?.shift?.name ?? 'Shift'} has ${actual}/${target} operational employees on ${key}.`,
-            recommendation: 'Add eligible employees, reduce policy headcount, or approve replacement/overtime coverage.',
-            shiftId,
-            shiftCode: String(working[0]?.shift?.code ?? ''),
-            date: key,
-            required: target,
-            actual,
-          });
-        }
-      }
-      const operationalCount = entries.filter((entry) => entry.date === key && entry.status === RosterStatus.SCHEDULED).length;
-      if (operationalCount < policy.requiredDailyHeadcount) {
-        issues.push({
-          severity: 'CRITICAL',
-          code: 'DAILY_HEADCOUNT_SHORTAGE',
-          message: `${key} has ${operationalCount}/${policy.requiredDailyHeadcount} operational employees.`,
-          recommendation: 'Use buffer employees, replacements, or adjust the selected location policy.',
-          date: key,
-          required: policy.requiredDailyHeadcount,
-          actual: operationalCount,
-        });
       }
     }
     return entries;

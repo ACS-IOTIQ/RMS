@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, Download, Save, Settings2, Upload } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, Download, Save, Settings2, Upload } from 'lucide-react';
 import { Topbar } from '@/components/topbar';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
@@ -81,16 +81,82 @@ function shiftTone(shift: any) {
   return shiftToneClasses[String(shift?.code ?? '')] ?? defaultShiftTone;
 }
 
+function safeWholeNumber(value: any) {
+  const count = Number(value ?? 0);
+  return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
+}
+
+function effectiveCellCount(cell: any) {
+  return safeWholeNumber(cell?.manualCount ?? cell?.suggestedCount ?? 0);
+}
+
+function calculatePolicyShiftTargets(policy: any, shifts: any[]) {
+  const headcount = safeWholeNumber(policy?.requiredDailyHeadcount ?? 0);
+  const distribution = policy?.shiftDistributionJson ?? defaultDistribution;
+  const weightedShifts = shifts
+    .map((shift, index) => ({
+      shift,
+      index,
+      weight: Number(distribution?.[shift.code] ?? 0),
+    }))
+    .filter((item) => Number.isFinite(item.weight) && item.weight > 0);
+  const totalWeight = weightedShifts.reduce((sum, item) => sum + item.weight, 0);
+  const targets = new Map<string, number>();
+  for (const item of shifts) targets.set(item.id, 0);
+  if (!headcount || !totalWeight) return targets;
+
+  const rawTargets = weightedShifts.map((item) => {
+    const raw = (headcount * item.weight) / totalWeight;
+    return {
+      ...item,
+      raw,
+      floor: Math.floor(raw),
+      rounded: Math.round(raw),
+      remainder: raw - Math.floor(raw),
+    };
+  });
+  const useLargestRemainder = String(policy?.roundingPolicy ?? 'LARGEST_REMAINDER_DESIGNATION_PRIORITY') === 'LARGEST_REMAINDER';
+  const baseTargets = useLargestRemainder
+    ? rawTargets.map((item) => ({ ...item, count: item.floor }))
+    : rawTargets.map((item) => ({ ...item, count: item.rounded }));
+
+  let difference = headcount - baseTargets.reduce((sum, item) => sum + item.count, 0);
+  if (difference > 0) {
+    const increaseOrder = [...baseTargets].sort((a, b) => (b.remainder - a.remainder) || (b.weight - a.weight) || (a.index - b.index));
+    for (let index = 0; difference > 0 && increaseOrder.length; index += 1, difference -= 1) {
+      increaseOrder[index % increaseOrder.length].count += 1;
+    }
+  }
+  if (difference < 0) {
+    const decreaseOrder = [...baseTargets].sort((a, b) => (a.remainder - b.remainder) || (a.weight - b.weight) || (b.index - a.index));
+    for (let index = 0; difference < 0 && decreaseOrder.length; index += 1) {
+      const item = decreaseOrder[index % decreaseOrder.length];
+      if (item.count <= 0) continue;
+      item.count -= 1;
+      difference += 1;
+    }
+  }
+
+  for (const item of baseTargets) targets.set(item.shift.id, item.count);
+  return targets;
+}
+
+function distributionSummary(distribution: any) {
+  return ['A', 'B', 'C'].map((code) => `${shiftLabel({ code })} ${safeWholeNumber(distribution?.[code] ?? 0)}%`).join(' / ');
+}
+
 export default function RosterPolicyPage() {
   const [projects, setProjects] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
   const [shifts, setShifts] = useState<any[]>([]);
   const [designations, setDesignations] = useState<any[]>([]);
   const [projectId, setProjectId] = useState('');
-  const [locationId, setLocationId] = useState('');
+  const [locationId, setLocationId] = useState(ALL_LOCATIONS);
   const [policy, setPolicy] = useState<any>(null);
   const [requirements, setRequirements] = useState<Record<string, number>>({});
   const [allLocationsData, setAllLocationsData] = useState<any>(null);
+  const [capacityRulesOpen, setCapacityRulesOpen] = useState(false);
+  const [shiftDistributionOpen, setShiftDistributionOpen] = useState(false);
   const [requirementSort, setRequirementSort] = useState('code:asc');
   const [designationSort, setDesignationSort] = useState('level:asc');
   const [requirementUploadOpen, setRequirementUploadOpen] = useState(false);
@@ -120,8 +186,8 @@ export default function RosterPolicyPage() {
       const rows = Array.isArray(data) ? data : data.data ?? [];
       setLocations(rows);
       setLocationId((current) => {
-        if (current === ALL_LOCATIONS) return ALL_LOCATIONS;
-        return rows.some((location: any) => location.id === current) ? current : rows[0]?.id ?? ALL_LOCATIONS;
+        if (!current || current === ALL_LOCATIONS) return ALL_LOCATIONS;
+        return rows.some((location: any) => location.id === current) ? current : ALL_LOCATIONS;
       });
     });
   }, [projectId]);
@@ -445,66 +511,107 @@ export default function RosterPolicyPage() {
           </CardContent>
         </Card>
 
-        <div className="grid gap-4 xl:grid-cols-[1fr_1.2fr]">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base"><Settings2 className="h-4 w-4" />Capacity Rules</CardTitle>
-              <CardDescription>{isAllLocations ? 'Draft values are applied to locations only when Apply to Locations is used.' : 'These values drive preview, publish, analytics, and export for the selected location.'}</CardDescription>
+        <div className="grid gap-3 xl:grid-cols-[1fr_1.2fr]">
+          <Card className="overflow-hidden">
+            <CardHeader className="p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <CardTitle className="flex items-center gap-2 text-base"><Settings2 className="h-4 w-4" />Capacity Rules</CardTitle>
+                  <CardDescription>
+                    {isAllLocations ? 'Draft values apply when Apply to Locations is used.' : 'These values drive the selected location.'}
+                    <span className="mt-1 block font-medium text-foreground">
+                      Daily {safeWholeNumber(policy?.requiredDailyHeadcount ?? 49)} / Workdays {safeWholeNumber(policy?.workingDaysPerEmployee ?? 6)} / Offs {safeWholeNumber(policy?.weeklyOffsPerEmployee ?? 1)}
+                    </span>
+                  </CardDescription>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  onClick={() => setCapacityRulesOpen((open) => !open)}
+                  aria-expanded={capacityRulesOpen}
+                  title={capacityRulesOpen ? 'Collapse capacity rules' : 'Expand capacity rules'}
+                >
+                  {capacityRulesOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                </Button>
+              </div>
             </CardHeader>
-            <CardContent className="grid gap-4 md:grid-cols-2">
-              <Field label="Required daily headcount" value={policy?.requiredDailyHeadcount ?? 49} onChange={(value) => updatePolicy('requiredDailyHeadcount', Number(value))} />
-              <Field label="Working days / employee" value={policy?.workingDaysPerEmployee ?? 6} onChange={(value) => updatePolicy('workingDaysPerEmployee', Number(value))} />
-              <Field label="Weekly offs / employee" value={policy?.weeklyOffsPerEmployee ?? 1} onChange={(value) => updatePolicy('weeklyOffsPerEmployee', Number(value))} />
-              <div className="space-y-1.5">
-                <Label>Rounding policy</Label>
-                <Select value={policy?.roundingPolicy ?? 'LARGEST_REMAINDER_DESIGNATION_PRIORITY'} onChange={(e) => updatePolicy('roundingPolicy', e.target.value)}>
-                  <option value="LARGEST_REMAINDER_DESIGNATION_PRIORITY">Largest remainder + designation priority</option>
-                  <option value="LARGEST_REMAINDER">Largest remainder</option>
-                  <option value="BUSINESS_PRIORITY">Business priority</option>
-                  <option value="DESIGNATION_PRIORITY">Designation priority</option>
-                  <option value="MANUAL_FIXED_COUNT">Manual fixed count</option>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label>Week start day</Label>
-                <Select value={policy?.weekStartDay ?? 'MONDAY'} onChange={(e) => updatePolicy('weekStartDay', e.target.value)}>
-                  {['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY'].map((day) => <option key={day}>{day}</option>)}
-                </Select>
-              </div>
-              {isAllLocations && (
-                <label className="flex items-center gap-2 rounded-md border p-3 text-sm md:col-span-2">
-                  <input type="checkbox" checked={Boolean(policy?.projectLevel247Enabled ?? true)} onChange={(e) => updatePolicy('projectLevel247Enabled', e.target.checked)} />
-                  Project-level 24/7 designation coverage
-                </label>
-              )}
-              <div className="space-y-2 rounded-md border p-3 md:col-span-2">
-                <Label>Controls</Label>
-                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(policy?.generalBufferEnabled ?? true)} onChange={(e) => updatePolicy('generalBufferEnabled', e.target.checked)} /> General/Buffer enabled</label>
-                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(policy?.allowExtraDuty ?? true)} onChange={(e) => updatePolicy('allowExtraDuty', e.target.checked)} /> Allow extra duty</label>
-                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(policy?.allowOvertime ?? true)} onChange={(e) => updatePolicy('allowOvertime', e.target.checked)} /> Allow overtime</label>
-              </div>
-            </CardContent>
+            {capacityRulesOpen && (
+              <CardContent className="grid gap-4 border-t p-4 md:grid-cols-2">
+                <Field label="Required daily headcount" value={policy?.requiredDailyHeadcount ?? 49} onChange={(value) => updatePolicy('requiredDailyHeadcount', Number(value))} />
+                <Field label="Working days / employee" value={policy?.workingDaysPerEmployee ?? 6} onChange={(value) => updatePolicy('workingDaysPerEmployee', Number(value))} />
+                <Field label="Weekly offs / employee" value={policy?.weeklyOffsPerEmployee ?? 1} onChange={(value) => updatePolicy('weeklyOffsPerEmployee', Number(value))} />
+                <div className="space-y-1.5">
+                  <Label>Rounding policy</Label>
+                  <Select value={policy?.roundingPolicy ?? 'LARGEST_REMAINDER_DESIGNATION_PRIORITY'} onChange={(e) => updatePolicy('roundingPolicy', e.target.value)}>
+                    <option value="LARGEST_REMAINDER_DESIGNATION_PRIORITY">Largest remainder + designation priority</option>
+                    <option value="LARGEST_REMAINDER">Largest remainder</option>
+                    <option value="BUSINESS_PRIORITY">Business priority</option>
+                    <option value="DESIGNATION_PRIORITY">Designation priority</option>
+                    <option value="MANUAL_FIXED_COUNT">Manual fixed count</option>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Week start day</Label>
+                  <Select value={policy?.weekStartDay ?? 'MONDAY'} onChange={(e) => updatePolicy('weekStartDay', e.target.value)}>
+                    {['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY'].map((day) => <option key={day}>{day}</option>)}
+                  </Select>
+                </div>
+                {isAllLocations && (
+                  <label className="flex items-center gap-2 rounded-md border p-3 text-sm md:col-span-2">
+                    <input type="checkbox" checked={Boolean(policy?.projectLevel247Enabled ?? true)} onChange={(e) => updatePolicy('projectLevel247Enabled', e.target.checked)} />
+                    Project-level 24/7 designation coverage
+                  </label>
+                )}
+                <div className="space-y-2 rounded-md border p-3 md:col-span-2">
+                  <Label>Controls</Label>
+                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(policy?.generalBufferEnabled ?? true)} onChange={(e) => updatePolicy('generalBufferEnabled', e.target.checked)} /> General/Buffer enabled</label>
+                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(policy?.allowExtraDuty ?? true)} onChange={(e) => updatePolicy('allowExtraDuty', e.target.checked)} /> Allow extra duty</label>
+                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(policy?.allowOvertime ?? true)} onChange={(e) => updatePolicy('allowOvertime', e.target.checked)} /> Allow overtime</label>
+                </div>
+              </CardContent>
+            )}
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Shift Distribution</CardTitle>
-              <CardDescription>Operational shift split is converted into dynamic daily targets and All Locations suggestions.</CardDescription>
+          <Card className="overflow-hidden">
+            <CardHeader className="p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <CardTitle className="text-base">Shift Distribution</CardTitle>
+                  <CardDescription>
+                    {distributionSummary(distribution)}
+                  </CardDescription>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  onClick={() => setShiftDistributionOpen((open) => !open)}
+                  aria-expanded={shiftDistributionOpen}
+                  title={shiftDistributionOpen ? 'Collapse shift distribution' : 'Expand shift distribution'}
+                >
+                  {shiftDistributionOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                </Button>
+              </div>
             </CardHeader>
-            <CardContent className="grid gap-3 md:grid-cols-3">
-              {['A', 'B', 'C'].map((code) => {
-                const shift = shifts.find((item) => item.code === code);
-                return (
-                  <div key={code} className="rounded-md border p-3">
-                    <div className="mb-2 flex items-center justify-between">
-                      <Badge variant="outline">{shiftLabel({ code })}</Badge>
-                      <span className="text-xs text-muted-foreground">{shift?.name ?? 'Policy shift'}</span>
+            {shiftDistributionOpen && (
+              <CardContent className="grid gap-3 border-t p-4 md:grid-cols-3">
+                {['A', 'B', 'C'].map((code) => {
+                  const shift = shifts.find((item) => item.code === code);
+                  return (
+                    <div key={code} className="rounded-md border p-3">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <Badge variant="outline">{shiftLabel({ code })}</Badge>
+                        <span className="min-w-0 truncate text-xs text-muted-foreground">{shift?.name ?? 'Policy shift'}</span>
+                      </div>
+                      <Input type="number" min={0} value={distribution[code] ?? 0} onChange={(e) => updateDistribution(code, Number(e.target.value))} />
                     </div>
-                    <Input type="number" min={0} value={distribution[code] ?? 0} onChange={(e) => updateDistribution(code, Number(e.target.value))} />
-                  </div>
-                );
-              })}
-            </CardContent>
+                  );
+                })}
+              </CardContent>
+            )}
           </Card>
         </div>
 
@@ -709,6 +816,37 @@ function AllLocationsWorkspace({
   exportAllLocations,
   saving,
 }: any) {
+  const locationTotals = useMemo(() => {
+    return matrixLocations.map((location: any) => {
+      const shifts = operationalShifts(location);
+      const shiftTargets = calculatePolicyShiftTargets(data?.policy, shifts);
+      const shiftTotals = new Map<string, number>();
+      let plannedTotal = 0;
+
+      for (const shift of shifts) {
+        const total = matrixDesignations.reduce((sum: number, designation: any) => {
+          const cell = cellMap.get(`${location.id}:${shift.id}:${designation.id}`);
+          return sum + effectiveCellCount(cell);
+        }, 0);
+        shiftTotals.set(shift.id, total);
+        plannedTotal += total;
+      }
+
+      return {
+        locationId: location.id,
+        shifts,
+        shiftTotals,
+        shiftTargets,
+        plannedTotal,
+        targetTotal: shifts.reduce((sum: number, shift: any) => sum + Number(shiftTargets.get(shift.id) ?? 0), 0),
+      };
+    });
+  }, [cellMap, data?.policy, matrixDesignations, matrixLocations, operationalShifts]);
+
+  const matrixColumnCount = useMemo(() => {
+    return 1 + matrixLocations.reduce((sum: number, location: any) => sum + Math.max(1, operationalShifts(location).length), 0);
+  }, [matrixLocations, operationalShifts]);
+
   if (!data) {
     return (
       <Card>
@@ -805,9 +943,48 @@ function AllLocationsWorkspace({
                 );
               })}
               {matrixDesignations.length === 0 && (
-                <TableRow><TableCell colSpan={2} className="py-8 text-center text-muted-foreground">No rows match the selected view.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={matrixColumnCount} className="py-8 text-center text-muted-foreground">No rows match the selected view.</TableCell></TableRow>
               )}
             </TableBody>
+            <TableFooter>
+              <TableRow className="hover:bg-muted/40">
+                <TableCell className="sticky left-0 z-20 border bg-muted font-semibold">
+                  Shift totals
+                </TableCell>
+                {matrixLocations.map((location: any, index: number) => {
+                  const summary = locationTotals[index];
+                  if (!summary?.shifts.length) {
+                    return <TableCell key={`${location.id}-totals-empty`} className="border text-center text-xs text-muted-foreground">-</TableCell>;
+                  }
+                  return summary.shifts.map((shift: any) => {
+                    const total = summary.shiftTotals.get(shift.id) ?? 0;
+                    const target = summary.shiftTargets.get(shift.id) ?? 0;
+                    const tone = shiftTone(shift);
+                    return (
+                      <TableCell key={`${location.id}-${shift.id}-total`} className={`border p-2 text-center ${tone.cell}`}>
+                        <div className="text-sm font-semibold">{total}</div>
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Target {target}</div>
+                      </TableCell>
+                    );
+                  });
+                })}
+              </TableRow>
+              <TableRow className="hover:bg-muted/40">
+                <TableCell className="sticky left-0 z-20 border bg-muted font-semibold">
+                  Location totals
+                </TableCell>
+                {matrixLocations.map((location: any, index: number) => {
+                  const summary = locationTotals[index];
+                  const span = Math.max(1, summary?.shifts.length ?? 0);
+                  return (
+                    <TableCell key={`${location.id}-location-total`} colSpan={span} className="border bg-white p-2 text-center">
+                      <div className="text-sm font-semibold">Total {summary?.plannedTotal ?? 0}</div>
+                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Policy target {summary?.targetTotal ?? 0}</div>
+                    </TableCell>
+                  );
+                })}
+              </TableRow>
+            </TableFooter>
           </Table>
         </CardContent>
       </Card>

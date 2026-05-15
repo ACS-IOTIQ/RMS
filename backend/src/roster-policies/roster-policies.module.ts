@@ -108,6 +108,19 @@ type CellStatus = {
   validationMessage?: string | null;
 };
 
+type AppliedRequirementRow = {
+  locationId: string;
+  shiftId: string;
+  shiftCode: string;
+  designationId: string;
+  designationName: string;
+  designationLevel: number;
+  isCritical: boolean;
+  availableCount: number;
+  count: number;
+  manualLocked: boolean;
+};
+
 function cleanDistribution(value: any) {
   const source = value && typeof value === 'object' ? value : { A: 40, B: 40, C: 20 };
   return Object.fromEntries(
@@ -285,14 +298,26 @@ export class RosterPoliciesService {
         policyId: id,
         shiftId: { in: shiftTemplates.map((shift) => shift.id) },
       },
-      include: { location: true, shift: true },
+      include: { location: true, shift: true, designation: true },
     });
     const cells = allCells.filter((cell) => (
       PROJECT_COVERAGE_SHIFT_CODES.includes(cell.shift?.code as ShiftCode) &&
       Number(distribution[String(cell.shift?.code)] ?? 0) > 0
     ));
     const locationsToApply = Array.from(new Map(cells.map((cell) => [cell.locationId, cell.location])).values());
+    const localShifts = await this.prisma.shift.findMany({
+      where: {
+        locationId: { in: locationsToApply.map((location) => location.id) },
+        code: { in: PROJECT_COVERAGE_SHIFT_CODES },
+      },
+    });
+    const localShiftsByLocation = new Map<string, any[]>();
+    for (const shift of localShifts) {
+      localShiftsByLocation.set(shift.locationId, [...(localShiftsByLocation.get(shift.locationId) ?? []), shift]);
+    }
+    const requirementsByLocation = this.appliedRequirementsByLocation(policy, locationsToApply, cells, localShiftsByLocation);
     let appliedCells = 0;
+    let appliedRequirements = 0;
     await this.prisma.$transaction(async (tx) => {
       for (const location of locationsToApply) {
         const locationPolicy = await tx.rosterPolicy.upsert({
@@ -326,14 +351,8 @@ export class RosterPoliciesService {
           },
         });
         const effectiveCells = cells.filter((cell) => cell.locationId === location.id);
-        const localShifts = await tx.shift.findMany({
-          where: { locationId: location.id, code: { in: PROJECT_COVERAGE_SHIFT_CODES } },
-        });
-        const localShiftByCode = new Map(localShifts.map((shift) => [String(shift.code), shift.id]));
-        const targetShiftIds = Array.from(new Set(effectiveCells.flatMap((cell) => [
-          cell.shiftId,
-          localShiftByCode.get(String(cell.shift?.code)) ?? cell.shiftId,
-        ])));
+        const normalizedRequirements = requirementsByLocation.get(location.id) ?? [];
+        const targetShiftIds = Array.from(new Set((localShiftsByLocation.get(location.id) ?? []).map((shift) => shift.id)));
         await tx.designationRequirement.updateMany({
           where: {
             projectId: policy.projectId,
@@ -343,22 +362,20 @@ export class RosterPoliciesService {
           },
           data: { isActive: false },
         });
-        for (const cell of effectiveCells) {
-          const requiredCount = effectiveCount(cell);
-          if (requiredCount > 0) {
-            await tx.designationRequirement.create({
-              data: {
-                projectId: policy.projectId,
-                locationId: cell.locationId,
-                shiftId: localShiftByCode.get(String(cell.shift?.code)) ?? cell.shiftId,
-                designationId: cell.designationId,
-                requiredCount,
-                dayType: DayType.ANY,
-              },
-            });
-          }
-          appliedCells += 1;
+        if (normalizedRequirements.length) {
+          await tx.designationRequirement.createMany({
+            data: normalizedRequirements.map((row) => ({
+              projectId: policy.projectId,
+              locationId: row.locationId,
+              shiftId: row.shiftId,
+              designationId: row.designationId,
+              requiredCount: row.count,
+              dayType: DayType.ANY,
+            })),
+          });
         }
+        appliedCells += effectiveCells.length;
+        appliedRequirements += normalizedRequirements.length;
         await tx.auditLog.create({
           data: {
             action: 'MULTI_LOCATION_POLICY_APPLY_LOCATION',
@@ -366,7 +383,13 @@ export class RosterPoliciesService {
             entityId: locationPolicy.id,
             actorUserId: actor?.userId,
             actorEmail: actor?.email,
-            metadata: JSON.parse(JSON.stringify({ sourcePolicyId: id, locationId: location.id, appliedCells: effectiveCells.length })),
+            metadata: JSON.parse(JSON.stringify({
+              sourcePolicyId: id,
+              locationId: location.id,
+              appliedCells: effectiveCells.length,
+              appliedRequirements: normalizedRequirements.length,
+              shiftTargets: this.calculateDailyShiftTargets(localShiftsByLocation.get(location.id) ?? [], policy),
+            })),
           },
         });
       }
@@ -375,10 +398,11 @@ export class RosterPoliciesService {
     await this.audit('MULTI_LOCATION_POLICY_APPLY', id, actor, {
       appliedLocations: locationsToApply.length,
       appliedCells,
+      appliedRequirements,
     }, 'MultiLocationRosterPolicy');
     return {
       ...(await this.multiLocationState(id)),
-      appliedSummary: { appliedLocations: locationsToApply.length, appliedCells },
+      appliedSummary: { appliedLocations: locationsToApply.length, appliedCells, appliedRequirements },
     };
   }
 
@@ -673,6 +697,7 @@ export class RosterPoliciesService {
         policy,
         locations,
         designations,
+        designationPolicies,
         coverageShifts,
         distribution,
         availability,
@@ -856,43 +881,6 @@ export class RosterPoliciesService {
       }
     }
 
-    const targetByShift = this.policyShiftTargets(policy, this.projectCoverageShifts(locations[0]?.shifts ?? [], distribution), distribution);
-    for (const location of locations) {
-      let locationTotal = 0;
-      const locationShifts = operationalByLocation.get(location.id) ?? [];
-      for (const shift of locationShifts) {
-        const target = targetByShift.get(shift.id) ?? 0;
-        const effectiveTotal = designations.reduce((sum, designation) => {
-          return sum + effectiveCount(cellByKey.get(`${location.id}:${shift.id}:${designation.id}`));
-        }, 0);
-        locationTotal += effectiveTotal;
-        if (effectiveTotal > target) {
-          pushIssue({
-            severity: 'CRITICAL',
-            code: 'SHIFT_REQUIREMENTS_EXCEED_POLICY_TARGET',
-            message: `${location.name} ${this.shiftLabel(shift)} requires ${effectiveTotal} employees, but policy target is ${target}.`,
-            locationId: location.id,
-            locationName: location.name,
-            shiftId: shift.id,
-            shiftCode: String(shift.code),
-            required: effectiveTotal,
-            actual: target,
-          });
-        }
-      }
-      if (locationTotal > Number(policy.requiredDailyHeadcount ?? 49)) {
-        pushIssue({
-          severity: 'CRITICAL',
-          code: 'LOCATION_REQUIREMENTS_EXCEED_DAILY_HEADCOUNT',
-          message: `${location.name} requirements total ${locationTotal}, but policy daily headcount is ${policy.requiredDailyHeadcount ?? 49}.`,
-          locationId: location.id,
-          locationName: location.name,
-          required: locationTotal,
-          actual: Number(policy.requiredDailyHeadcount ?? 49),
-        });
-      }
-    }
-
     const summary = {
       issues,
       criticalCount: issues.filter((issue) => issue.severity === 'CRITICAL').length,
@@ -907,6 +895,7 @@ export class RosterPoliciesService {
     policy: any,
     locations: any[],
     designations: any[],
+    designationPolicies: any[],
     shifts: any[],
     distribution: Record<string, number>,
     availability: Map<string, number>,
@@ -915,12 +904,11 @@ export class RosterPoliciesService {
     const suggestions = new Map<string, number>();
     const cellByKey = new Map(cells.map((cell) => [`${cell.locationId}:${cell.shiftId}:${cell.designationId}`, cell]));
 
-    for (const [designationIndex, designation] of designations.entries()) {
+    for (const designation of designations) {
       const remainingByLocation = new Map(locations.map((location) => [
         location.id,
         availability.get(`${location.id}:${designation.id}`) ?? 0,
       ]));
-      const projectShiftTotals = new Map(shifts.map((shift) => [shift.id, 0]));
 
       for (const location of locations) {
         for (const shift of shifts) {
@@ -929,11 +917,10 @@ export class RosterPoliciesService {
           if (cell?.manualCount === null || cell?.manualCount === undefined) continue;
           const manualCount = Number(cell.manualCount ?? 0);
           remainingByLocation.set(location.id, (remainingByLocation.get(location.id) ?? 0) - manualCount);
-          if (manualCount > 0) projectShiftTotals.set(shift.id, (projectShiftTotals.get(shift.id) ?? 0) + manualCount);
         }
       }
 
-      for (const [locationIndex, location] of locations.entries()) {
+      for (const location of locations) {
         const remaining = Math.max(0, remainingByLocation.get(location.id) ?? 0);
         if (remaining <= 0) continue;
         const unlockedShifts = shifts.filter((shift) => {
@@ -942,199 +929,453 @@ export class RosterPoliciesService {
         });
         if (!unlockedShifts.length) continue;
 
-        const split = remaining >= unlockedShifts.length
-          ? this.suggestSplit(remaining, unlockedShifts, distribution, Boolean(designation.isCritical))
-          : this.lowCoverageSplit(remaining, unlockedShifts, projectShiftTotals, distribution, designationIndex + locationIndex);
-
-        let assigned = 0;
+        const split = this.suggestSplit(remaining, unlockedShifts, distribution);
         for (const shift of unlockedShifts) {
           const count = Number(split[shift.id] ?? 0);
           if (count <= 0) continue;
           const key = `${location.id}:${shift.id}:${designation.id}`;
           suggestions.set(key, count);
-          assigned += count;
-          projectShiftTotals.set(shift.id, (projectShiftTotals.get(shift.id) ?? 0) + count);
         }
-        remainingByLocation.set(location.id, remaining - assigned);
-      }
-
-      for (const shift of shifts) {
-        if ((projectShiftTotals.get(shift.id) ?? 0) > 0) continue;
-        const candidate = [...locations]
-          .filter((location) => {
-            const cell = cellByKey.get(`${location.id}:${shift.id}:${designation.id}`);
-            return (cell?.manualCount === null || cell?.manualCount === undefined) && (remainingByLocation.get(location.id) ?? 0) > 0;
-          })
-          .sort((a, b) => {
-            const remainingDiff = (remainingByLocation.get(b.id) ?? 0) - (remainingByLocation.get(a.id) ?? 0);
-            if (remainingDiff !== 0) return remainingDiff;
-            return String(a.name).localeCompare(String(b.name));
-          })[0];
-        if (!candidate) continue;
-        const key = `${candidate.id}:${shift.id}:${designation.id}`;
-        suggestions.set(key, (suggestions.get(key) ?? 0) + 1);
-        remainingByLocation.set(candidate.id, (remainingByLocation.get(candidate.id) ?? 0) - 1);
-        projectShiftTotals.set(shift.id, (projectShiftTotals.get(shift.id) ?? 0) + 1);
       }
     }
 
-    return this.capSuggestionsToPolicyTargets(policy, locations, designations, shifts, distribution, cells, suggestions);
+    this.ensureProjectSharedShiftCoverage(policy, locations, designations, designationPolicies, shifts, distribution, availability, cells, suggestions);
+
+    return this.normalizeSuggestionsToPolicyTargets(policy, locations, designations, shifts, distribution, availability, cells, suggestions);
   }
 
-  private capSuggestionsToPolicyTargets(
+  private ensureProjectSharedShiftCoverage(
+    policy: any,
+    locations: any[],
+    designations: any[],
+    designationPolicies: any[],
+    shifts: any[],
+    distribution: Record<string, number>,
+    availability: Map<string, number>,
+    cells: any[],
+    suggestions: Map<string, number>,
+  ) {
+    if (!policy.projectLevel247Enabled) return;
+    const cellByKey = new Map(cells.map((cell) => [`${cell.locationId}:${cell.shiftId}:${cell.designationId}`, cell]));
+    const modeByDesignation = new Map(designationPolicies.map((row) => [row.designationId, row.coverageMode]));
+    const generatedCount = (locationId: string, shiftId: string, designationId: string) => {
+      const key = `${locationId}:${shiftId}:${designationId}`;
+      const cell = cellByKey.get(key);
+      if (!cell) return 0;
+      if (cell.manualCount !== null && cell.manualCount !== undefined) return Number(cell.manualCount ?? 0);
+      return Number(suggestions.get(key) ?? 0);
+    };
+    const setGeneratedCount = (locationId: string, shiftId: string, designationId: string, value: number) => {
+      const key = `${locationId}:${shiftId}:${designationId}`;
+      const cell = cellByKey.get(key);
+      if (!cell || cell.manualCount !== null && cell.manualCount !== undefined) return;
+      if (value > 0) suggestions.set(key, value);
+      else suggestions.delete(key);
+    };
+    const projectShiftTotal = (shiftId: string, designationId: string) => locations.reduce((sum, location) => {
+      return sum + generatedCount(location.id, shiftId, designationId);
+    }, 0);
+
+    for (const designation of designations) {
+      const mode = modeByDesignation.get(designation.id) ?? CoverageMode.PROJECT_SHARED;
+      if (mode !== CoverageMode.PROJECT_SHARED) continue;
+      const projectAvailable = locations.reduce((sum, location) => {
+        return sum + (availability.get(`${location.id}:${designation.id}`) ?? 0);
+      }, 0);
+      if (projectAvailable <= 0) continue;
+
+      const projectTarget = this.suggestSplit(projectAvailable, shifts, distribution);
+      let guard = 0;
+      while (guard < 1000) {
+        guard += 1;
+        const deficits = shifts
+          .map((shift) => ({
+            shift,
+            deficit: Number(projectTarget[shift.id] ?? 0) - projectShiftTotal(shift.id, designation.id),
+          }))
+          .filter((row) => row.deficit > 0)
+          .sort((a, b) => {
+            if (b.deficit !== a.deficit) return b.deficit - a.deficit;
+            return String(a.shift.code).localeCompare(String(b.shift.code));
+          });
+        if (!deficits.length) break;
+
+        let moved = false;
+        for (const { shift: targetShift } of deficits) {
+          const donors = shifts
+            .filter((shift) => shift.id !== targetShift.id)
+            .map((shift) => ({
+              shift,
+              surplus: projectShiftTotal(shift.id, designation.id) - Number(projectTarget[shift.id] ?? 0),
+            }))
+            .filter((row) => row.surplus > 0)
+            .sort((a, b) => {
+              if (b.surplus !== a.surplus) return b.surplus - a.surplus;
+              return String(a.shift.code).localeCompare(String(b.shift.code));
+            });
+
+          for (const { shift: donorShift } of donors) {
+            const candidate = locations
+              .map((location) => {
+                const available = availability.get(`${location.id}:${designation.id}`) ?? 0;
+                const targetCell = cellByKey.get(`${location.id}:${targetShift.id}:${designation.id}`);
+                const donorCell = cellByKey.get(`${location.id}:${donorShift.id}:${designation.id}`);
+                const targetCount = generatedCount(location.id, targetShift.id, designation.id);
+                const donorCount = generatedCount(location.id, donorShift.id, designation.id);
+                if (available <= 0 || available >= shifts.length) return null;
+                if (!targetCell || !donorCell) return null;
+                if (targetCell.manualCount !== null && targetCell.manualCount !== undefined) return null;
+                if (donorCell.manualCount !== null && donorCell.manualCount !== undefined) return null;
+                if (targetCount > 0 || donorCount <= 0) return null;
+                return { location, available, targetCount, donorCount };
+              })
+              .filter(Boolean)
+              .sort((a: any, b: any) => {
+                if (b.donorCount !== a.donorCount) return b.donorCount - a.donorCount;
+                return String(a.location.name).localeCompare(String(b.location.name));
+              })[0] as any;
+
+            if (!candidate) continue;
+            setGeneratedCount(candidate.location.id, donorShift.id, designation.id, candidate.donorCount - 1);
+            setGeneratedCount(candidate.location.id, targetShift.id, designation.id, candidate.targetCount + 1);
+            moved = true;
+            break;
+          }
+          if (moved) break;
+        }
+        if (!moved) break;
+      }
+
+      for (const targetShift of shifts) {
+        if (projectAvailable < shifts.length || projectShiftTotal(targetShift.id, designation.id) > 0) continue;
+
+        const candidates = locations
+          .map((location) => {
+            const targetCell = cellByKey.get(`${location.id}:${targetShift.id}:${designation.id}`);
+            if (!targetCell || targetCell.manualCount !== null && targetCell.manualCount !== undefined) return null;
+            const available = availability.get(`${location.id}:${designation.id}`) ?? 0;
+            if (available <= 0) return null;
+            const locationTotal = shifts.reduce((sum, shift) => sum + generatedCount(location.id, shift.id, designation.id), 0);
+            const donor = shifts
+              .filter((shift) => shift.id !== targetShift.id)
+              .map((shift) => {
+                const donorCell = cellByKey.get(`${location.id}:${shift.id}:${designation.id}`);
+                const donorCount = generatedCount(location.id, shift.id, designation.id);
+                return {
+                  shift,
+                  donorCell,
+                  donorCount,
+                  projectTotal: projectShiftTotal(shift.id, designation.id),
+                };
+              })
+              .filter((row) => row.donorCell?.manualCount === null || row.donorCell?.manualCount === undefined)
+              .filter((row) => row.donorCount > 0 && row.projectTotal > 1)
+              .sort((a, b) => {
+                if (b.donorCount !== a.donorCount) return b.donorCount - a.donorCount;
+                if (b.projectTotal !== a.projectTotal) return b.projectTotal - a.projectTotal;
+                return String(a.shift.code).localeCompare(String(b.shift.code));
+              })[0];
+            return {
+              location,
+              available,
+              locationTotal,
+              donor,
+              spareCapacity: Math.max(0, available - locationTotal),
+            };
+          })
+          .filter(Boolean)
+          .sort((a: any, b: any) => {
+            if (b.spareCapacity !== a.spareCapacity) return b.spareCapacity - a.spareCapacity;
+            if (Number(Boolean(b.donor)) !== Number(Boolean(a.donor))) return Number(Boolean(b.donor)) - Number(Boolean(a.donor));
+            const donorDiff = Number(b.donor?.donorCount ?? 0) - Number(a.donor?.donorCount ?? 0);
+            if (donorDiff !== 0) return donorDiff;
+            return String(a.location.name).localeCompare(String(b.location.name));
+          }) as any[];
+
+        const candidate = candidates[0];
+        if (!candidate) continue;
+        const currentTarget = generatedCount(candidate.location.id, targetShift.id, designation.id);
+        if (candidate.spareCapacity > 0) {
+          setGeneratedCount(candidate.location.id, targetShift.id, designation.id, currentTarget + 1);
+          continue;
+        }
+        if (candidate.donor) {
+          setGeneratedCount(candidate.location.id, candidate.donor.shift.id, designation.id, candidate.donor.donorCount - 1);
+          setGeneratedCount(candidate.location.id, targetShift.id, designation.id, currentTarget + 1);
+        }
+      }
+    }
+  }
+
+  private normalizeSuggestionsToPolicyTargets(
     policy: any,
     locations: any[],
     designations: any[],
     shifts: any[],
     distribution: Record<string, number>,
+    availability: Map<string, number>,
     cells: any[],
     suggestions: Map<string, number>,
   ) {
-    const capped = new Map(suggestions);
-    const targetByShift = this.policyShiftTargets(policy, shifts, distribution);
-    const designationById = new Map(designations.map((designation) => [designation.id, designation]));
-    const cellsByLocationShift = new Map<string, any[]>();
-    for (const cell of cells) {
-      const key = `${cell.locationId}:${cell.shiftId}`;
-      cellsByLocationShift.set(key, [...(cellsByLocationShift.get(key) ?? []), cell]);
-    }
+    const cellByKey = new Map(cells.map((cell) => [`${cell.locationId}:${cell.shiftId}:${cell.designationId}`, cell]));
+    const rows: AppliedRequirementRow[] = [];
+    const rowsByLocationShift = new Map<string, AppliedRequirementRow[]>();
+    const projectShiftDesignationTotals = new Map<string, number>();
+    const locationDesignationTotals = new Map<string, number>();
+
+    const addRow = (row: AppliedRequirementRow) => {
+      rows.push(row);
+      rowsByLocationShift.set(`${row.locationId}:${row.shiftId}`, [...(rowsByLocationShift.get(`${row.locationId}:${row.shiftId}`) ?? []), row]);
+      projectShiftDesignationTotals.set(`${row.shiftCode}:${row.designationId}`, (projectShiftDesignationTotals.get(`${row.shiftCode}:${row.designationId}`) ?? 0) + row.count);
+      locationDesignationTotals.set(`${row.locationId}:${row.designationId}`, (locationDesignationTotals.get(`${row.locationId}:${row.designationId}`) ?? 0) + row.count);
+    };
 
     for (const location of locations) {
       for (const shift of shifts) {
-        const target = targetByShift.get(shift.id) ?? 0;
-        const rows = cellsByLocationShift.get(`${location.id}:${shift.id}`) ?? [];
-        const manualTotal = rows.reduce((sum, cell) => {
-          return cell.manualCount === null || cell.manualCount === undefined ? sum : sum + Number(cell.manualCount ?? 0);
-        }, 0);
-        const allowedSuggested = Math.max(0, target - manualTotal);
-        const suggestedRows = rows
-          .filter((cell) => cell.manualCount === null || cell.manualCount === undefined)
-          .map((cell) => ({
-            cell,
-            value: Number(capped.get(`${cell.locationId}:${cell.shiftId}:${cell.designationId}`) ?? 0),
-          }));
-        let suggestedTotal = suggestedRows.reduce((sum, row) => sum + row.value, 0);
-        if (suggestedTotal <= allowedSuggested) continue;
-
-        const sortRows = () => suggestedRows
-          .filter((row) => row.value > 0)
-          .sort((a, b) => {
-            const aDesignation = designationById.get(a.cell.designationId);
-            const bDesignation = designationById.get(b.cell.designationId);
-            const criticalDiff = Number(Boolean(aDesignation?.isCritical)) - Number(Boolean(bDesignation?.isCritical));
-            if (criticalDiff !== 0) return criticalDiff;
-            if (b.value !== a.value) return b.value - a.value;
-            const levelDiff = Number(bDesignation?.level ?? 0) - Number(aDesignation?.level ?? 0);
-            if (levelDiff !== 0) return levelDiff;
-            return String(aDesignation?.name ?? '').localeCompare(String(bDesignation?.name ?? ''));
+        for (const designation of designations) {
+          const key = `${location.id}:${shift.id}:${designation.id}`;
+          const cell = cellByKey.get(key);
+          if (!cell) continue;
+          const manualLocked = cell.manualCount !== null && cell.manualCount !== undefined;
+          addRow({
+            locationId: location.id,
+            shiftId: shift.id,
+            shiftCode: String(shift.code),
+            designationId: designation.id,
+            designationName: designation.name ?? '',
+            designationLevel: Number(designation.level ?? 0),
+            isCritical: Boolean(designation.isCritical),
+            availableCount: availability.get(`${location.id}:${designation.id}`) ?? Number(cell.availableCount ?? 0),
+            count: Math.max(0, manualLocked ? Number(cell.manualCount ?? 0) : Number(suggestions.get(key) ?? 0)),
+            manualLocked,
           });
-
-        while (suggestedTotal > allowedSuggested) {
-          const reducible = sortRows();
-          if (!reducible.length) break;
-          const row = reducible[0];
-          row.value -= 1;
-          suggestedTotal -= 1;
-        }
-
-        for (const row of suggestedRows) {
-          const key = `${row.cell.locationId}:${row.cell.shiftId}:${row.cell.designationId}`;
-          if (row.value > 0) capped.set(key, row.value);
-          else capped.delete(key);
         }
       }
     }
 
-    return capped;
+    for (const location of locations) {
+      const dailyTargets = this.calculateDailyShiftTargets(shifts, policy);
+      for (const shift of shifts) {
+        this.fitRequirementRowsToShiftTarget(
+          rowsByLocationShift.get(`${location.id}:${shift.id}`) ?? [],
+          Number(dailyTargets[shift.id] ?? 0),
+          projectShiftDesignationTotals,
+          locationDesignationTotals,
+        );
+      }
+    }
+
+    const normalized = new Map<string, number>();
+    for (const row of rows) {
+      if (row.manualLocked || row.count <= 0) continue;
+      normalized.set(`${row.locationId}:${row.shiftId}:${row.designationId}`, row.count);
+    }
+    return normalized;
   }
 
-  private policyShiftTargets(policy: any, shifts: any[], distribution: Record<string, number>) {
-    const targetHeadcount = Number(policy.requiredDailyHeadcount ?? 49);
-    const operationalShifts = shifts.filter((shift) => Number(distribution[shift.code] ?? 0) > 0);
-    const totalWeight = operationalShifts.reduce((sum, shift) => sum + Number(distribution[shift.code] ?? 0), 0);
-    const rows = operationalShifts.map((shift) => {
-      const raw = totalWeight > 0 ? (targetHeadcount * Number(distribution[shift.code] ?? 0)) / totalWeight : 0;
+  private appliedRequirementsByLocation(
+    policy: any,
+    locations: any[],
+    cells: any[],
+    localShiftsByLocation: Map<string, any[]>,
+  ) {
+    const distribution = cleanDistribution(policy.shiftDistributionJson);
+    const rows: AppliedRequirementRow[] = [];
+    const rowsByLocationShift = new Map<string, AppliedRequirementRow[]>();
+    const projectShiftDesignationTotals = new Map<string, number>();
+    const locationDesignationTotals = new Map<string, number>();
+
+    const addRow = (row: AppliedRequirementRow) => {
+      rows.push(row);
+      const groupKey = `${row.locationId}:${row.shiftId}`;
+      rowsByLocationShift.set(groupKey, [...(rowsByLocationShift.get(groupKey) ?? []), row]);
+      const projectKey = `${row.shiftCode}:${row.designationId}`;
+      projectShiftDesignationTotals.set(projectKey, (projectShiftDesignationTotals.get(projectKey) ?? 0) + row.count);
+      const locationDesignationKey = `${row.locationId}:${row.designationId}`;
+      locationDesignationTotals.set(locationDesignationKey, (locationDesignationTotals.get(locationDesignationKey) ?? 0) + row.count);
+    };
+
+    for (const location of locations) {
+      const localShifts = this.operationalShifts(localShiftsByLocation.get(location.id) ?? [], distribution)
+        .filter((shift) => PROJECT_COVERAGE_SHIFT_CODES.includes(shift.code as ShiftCode));
+      const localShiftByCode = new Map(localShifts.map((shift) => [String(shift.code), shift]));
+
+      for (const cell of cells.filter((item) => item.locationId === location.id)) {
+        const shiftCode = String(cell.shift?.code ?? '');
+        const localShift = localShiftByCode.get(shiftCode);
+        if (!localShift) continue;
+        addRow({
+          locationId: location.id,
+          shiftId: localShift.id,
+          shiftCode,
+          designationId: cell.designationId,
+          designationName: cell.designation?.name ?? '',
+          designationLevel: Number(cell.designation?.level ?? 0),
+          isCritical: Boolean(cell.designation?.isCritical),
+          availableCount: Number(cell.availableCount ?? 0),
+          count: Math.max(0, effectiveCount(cell)),
+          manualLocked: cell.manualCount !== null && cell.manualCount !== undefined,
+        });
+      }
+    }
+
+    for (const location of locations) {
+      const localShifts = this.operationalShifts(localShiftsByLocation.get(location.id) ?? [], distribution)
+        .filter((shift) => PROJECT_COVERAGE_SHIFT_CODES.includes(shift.code as ShiftCode));
+      const dailyTargets = this.calculateDailyShiftTargets(localShifts, policy);
+      for (const shift of localShifts) {
+        this.fitRequirementRowsToShiftTarget(
+          rowsByLocationShift.get(`${location.id}:${shift.id}`) ?? [],
+          Number(dailyTargets[shift.id] ?? 0),
+          projectShiftDesignationTotals,
+          locationDesignationTotals,
+        );
+      }
+    }
+
+    const byLocation = new Map<string, AppliedRequirementRow[]>();
+    for (const row of rows.filter((item) => item.count > 0)) {
+      byLocation.set(row.locationId, [...(byLocation.get(row.locationId) ?? []), row]);
+    }
+    return byLocation;
+  }
+
+  private fitRequirementRowsToShiftTarget(
+    rows: AppliedRequirementRow[],
+    target: number,
+    projectShiftDesignationTotals: Map<string, number>,
+    locationDesignationTotals: Map<string, number>,
+  ) {
+    let total = rows.reduce((sum, row) => sum + row.count, 0);
+    let guard = 0;
+
+    const projectKey = (row: AppliedRequirementRow) => `${row.shiftCode}:${row.designationId}`;
+    const locationDesignationKey = (row: AppliedRequirementRow) => `${row.locationId}:${row.designationId}`;
+    const decrement = (row: AppliedRequirementRow) => {
+      row.count -= 1;
+      projectShiftDesignationTotals.set(projectKey(row), Math.max(0, (projectShiftDesignationTotals.get(projectKey(row)) ?? 0) - 1));
+      locationDesignationTotals.set(locationDesignationKey(row), Math.max(0, (locationDesignationTotals.get(locationDesignationKey(row)) ?? 0) - 1));
+      total -= 1;
+    };
+    const increment = (row: AppliedRequirementRow) => {
+      row.count += 1;
+      projectShiftDesignationTotals.set(projectKey(row), (projectShiftDesignationTotals.get(projectKey(row)) ?? 0) + 1);
+      locationDesignationTotals.set(locationDesignationKey(row), (locationDesignationTotals.get(locationDesignationKey(row)) ?? 0) + 1);
+      total += 1;
+    };
+
+    while (total > target && guard < 10000) {
+      guard += 1;
+      const candidates = rows
+        .filter((row) => row.count > 0)
+        .filter((row) => (projectShiftDesignationTotals.get(projectKey(row)) ?? 0) > 1)
+        .sort((a, b) => {
+          if (Number(a.manualLocked) !== Number(b.manualLocked)) return Number(a.manualLocked) - Number(b.manualLocked);
+          if (b.count !== a.count) return b.count - a.count;
+          if (Number(a.isCritical) !== Number(b.isCritical)) return Number(a.isCritical) - Number(b.isCritical);
+          if (b.designationLevel !== a.designationLevel) return b.designationLevel - a.designationLevel;
+          return a.designationName.localeCompare(b.designationName);
+        });
+      if (!candidates.length) break;
+      decrement(candidates[0]);
+    }
+
+    while (total < target && guard < 20000) {
+      guard += 1;
+      let candidates = rows
+        .filter((row) => !row.manualLocked)
+        .filter((row) => {
+          const used = locationDesignationTotals.get(locationDesignationKey(row)) ?? 0;
+          return row.availableCount <= 0 ? row.count > 0 : used < row.availableCount;
+        });
+      if (!candidates.length) {
+        candidates = rows.filter((row) => {
+          const used = locationDesignationTotals.get(locationDesignationKey(row)) ?? 0;
+          return row.availableCount <= 0 ? row.count > 0 : used < row.availableCount;
+        });
+      }
+      if (!candidates.length) candidates = rows;
+      if (!candidates.length) break;
+      candidates.sort((a, b) => {
+        const aRemaining = a.availableCount - (locationDesignationTotals.get(locationDesignationKey(a)) ?? 0);
+        const bRemaining = b.availableCount - (locationDesignationTotals.get(locationDesignationKey(b)) ?? 0);
+        if (bRemaining !== aRemaining) return bRemaining - aRemaining;
+        if (Number(b.isCritical) !== Number(a.isCritical)) return Number(b.isCritical) - Number(a.isCritical);
+        if (a.count !== b.count) return a.count - b.count;
+        if (a.designationLevel !== b.designationLevel) return a.designationLevel - b.designationLevel;
+        return a.designationName.localeCompare(b.designationName);
+      });
+      increment(candidates[0]);
+    }
+  }
+
+  private calculateDailyShiftTargets(shifts: any[], policy: any) {
+    const distribution = cleanDistribution(policy.shiftDistributionJson);
+    const operationalShifts = this.operationalShifts(shifts, distribution)
+      .filter((shift) => PROJECT_COVERAGE_SHIFT_CODES.includes(shift.code as ShiftCode));
+    const dailyTargets: Record<string, number> = Object.fromEntries(operationalShifts.map((shift) => [shift.id, 0]));
+    const requiredDailyHeadcount = Number(policy.requiredDailyHeadcount ?? 49);
+    const distributionTotal = operationalShifts.reduce((sum, shift) => sum + Number(distribution[shift.code] ?? 0), 0);
+    if (requiredDailyHeadcount <= 0 || distributionTotal <= 0) return dailyTargets;
+
+    const rawRows = operationalShifts.map((shift) => {
+      const raw = (requiredDailyHeadcount * Number(distribution[shift.code] ?? 0)) / distributionTotal;
       return {
         shift,
+        shiftId: shift.id,
         floor: Math.floor(raw),
         rounded: Math.round(raw),
         remainder: raw - Math.floor(raw),
       };
     });
-    const targets = new Map<string, number>();
 
     if (policy.roundingPolicy === RoundingPolicy.LARGEST_REMAINDER) {
-      for (const row of rows) targets.set(row.shift.id, row.floor);
-      let total = Array.from(targets.values()).reduce((sum, value) => sum + value, 0);
-      const order = [...rows].sort((a, b) => {
+      for (const row of rawRows) dailyTargets[row.shiftId] = row.floor;
+      let total = Object.values(dailyTargets).reduce((sum, value) => sum + value, 0);
+      const remainderOrder = [...rawRows].sort((a, b) => {
         if (b.remainder !== a.remainder) return b.remainder - a.remainder;
+        if ((b.shift.priority ?? 0) !== (a.shift.priority ?? 0)) return (b.shift.priority ?? 0) - (a.shift.priority ?? 0);
         return String(a.shift.code).localeCompare(String(b.shift.code));
       });
       let cursor = 0;
-      while (total < targetHeadcount && order.length) {
-        const shiftId = order[cursor % order.length].shift.id;
-        targets.set(shiftId, (targets.get(shiftId) ?? 0) + 1);
+      while (total < requiredDailyHeadcount && remainderOrder.length > 0) {
+        const row = remainderOrder[cursor % remainderOrder.length];
+        dailyTargets[row.shiftId] += 1;
         total += 1;
         cursor += 1;
       }
     } else {
-      for (const row of rows) targets.set(row.shift.id, row.rounded);
+      for (const row of rawRows) dailyTargets[row.shiftId] = row.rounded;
     }
 
-    let total = Array.from(targets.values()).reduce((sum, value) => sum + value, 0);
+    let total = Object.values(dailyTargets).reduce((sum, value) => sum + value, 0);
     const downOrder = [...operationalShifts].sort((a, b) => {
+      if ((a.priority ?? 0) !== (b.priority ?? 0)) return (a.priority ?? 0) - (b.priority ?? 0);
       const aDistribution = Number(distribution[a.code] ?? 0);
       const bDistribution = Number(distribution[b.code] ?? 0);
       if (aDistribution !== bDistribution) return aDistribution - bDistribution;
       return String(b.code).localeCompare(String(a.code));
     });
-    while (total > targetHeadcount) {
-      const candidate = downOrder.find((shift) => (targets.get(shift.id) ?? 0) > 0);
+    while (total > requiredDailyHeadcount) {
+      const candidate = downOrder.find((shift) => dailyTargets[shift.id] > 0);
       if (!candidate) break;
-      targets.set(candidate.id, (targets.get(candidate.id) ?? 0) - 1);
+      dailyTargets[candidate.id] -= 1;
       total -= 1;
     }
 
     const upOrder = [...operationalShifts].sort((a, b) => {
+      if ((a.priority ?? 0) !== (b.priority ?? 0)) return (b.priority ?? 0) - (a.priority ?? 0);
       const aDistribution = Number(distribution[a.code] ?? 0);
       const bDistribution = Number(distribution[b.code] ?? 0);
       if (aDistribution !== bDistribution) return bDistribution - aDistribution;
       return String(a.code).localeCompare(String(b.code));
     });
-    let cursor = 0;
-    while (total < targetHeadcount && upOrder.length) {
-      const candidate = upOrder[cursor % upOrder.length];
-      targets.set(candidate.id, (targets.get(candidate.id) ?? 0) + 1);
+    while (total < requiredDailyHeadcount && upOrder.length > 0) {
+      const candidate = upOrder[(requiredDailyHeadcount - total - 1) % upOrder.length];
+      dailyTargets[candidate.id] += 1;
       total += 1;
-      cursor += 1;
     }
-
-    return targets;
-  }
-
-  private lowCoverageSplit(
-    available: number,
-    shifts: any[],
-    projectShiftTotals: Map<string, number>,
-    distribution: Record<string, number>,
-    offset: number,
-  ) {
-    const result: Record<string, number> = Object.fromEntries(shifts.map((shift) => [shift.id, 0]));
-    const rotated = shifts.length
-      ? [...shifts.slice(offset % shifts.length), ...shifts.slice(0, offset % shifts.length)]
-      : [];
-    const rotationRank = new Map(rotated.map((shift, index) => [shift.id, index]));
-    const ordered = [...shifts].sort((a, b) => {
-      const totalDiff = (projectShiftTotals.get(a.id) ?? 0) - (projectShiftTotals.get(b.id) ?? 0);
-      if (totalDiff !== 0) return totalDiff;
-      const distributionDiff = Number(distribution[b.code] ?? 0) - Number(distribution[a.code] ?? 0);
-      if (distributionDiff !== 0) return distributionDiff;
-      return (rotationRank.get(a.id) ?? 0) - (rotationRank.get(b.id) ?? 0);
-    });
-    for (let index = 0; index < Math.min(available, ordered.length); index += 1) {
-      result[ordered[index].id] = 1;
-    }
-    return result;
+    return dailyTargets;
   }
 
   private projectCoverageShifts(shifts: any[], distribution: Record<string, number>) {
@@ -1142,19 +1383,12 @@ export class RosterPoliciesService {
       .filter((shift) => PROJECT_COVERAGE_SHIFT_CODES.includes(shift.code as ShiftCode));
   }
 
-  private suggestSplit(available: number, shifts: any[], distribution: Record<string, number>, critical: boolean) {
+  private suggestSplit(available: number, shifts: any[], distribution: Record<string, number>) {
     const result: Record<string, number> = Object.fromEntries(shifts.map((shift) => [shift.id, 0]));
     if (available <= 0 || shifts.length === 0) return result;
-    let remaining = available;
-    if (critical && available >= shifts.length) {
-      for (const shift of shifts) {
-        result[shift.id] = 1;
-        remaining -= 1;
-      }
-    }
     const totalWeight = shifts.reduce((sum, shift) => sum + Number(distribution[shift.code] ?? 0), 0) || shifts.length;
     const rows = shifts.map((shift) => {
-      const raw = (remaining * Number(distribution[shift.code] ?? 1)) / totalWeight;
+      const raw = (available * Number(distribution[shift.code] ?? 1)) / totalWeight;
       const floor = Math.floor(raw);
       result[shift.id] += floor;
       return { shift, remainder: raw - floor };
