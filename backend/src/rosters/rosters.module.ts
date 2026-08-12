@@ -45,7 +45,7 @@ import {
   WeeklyGroup,
   WorkforceCategory,
 } from '@prisma/client';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -74,6 +74,15 @@ class WeeklyPreviewDto {
   };
 }
 
+class PeriodPreviewDto {
+  @IsOptional() @IsString() projectId?: string;
+  @IsOptional() @IsString() locationId?: string;
+  @IsDateString() startDate: string;
+  @IsDateString() endDate: string;
+  @IsOptional() @IsString() period?: RosterReportPeriod | string;
+  @IsOptional() @IsString() scope?: RosterReportScope | string;
+}
+
 class AssignDto {
   @IsString() @IsNotEmpty() employeeId: string;
   @IsString() @IsNotEmpty() shiftId: string;
@@ -89,6 +98,17 @@ class OverrideDto {
   @IsOptional() oldValue?: any;
   @IsOptional() newValue?: any;
 }
+
+type RosterReportPeriod = 'week' | 'month' | 'three-month';
+type RosterReportScope = 'location' | 'all';
+type RosterReportParams = {
+  projectId?: string;
+  locationId?: string;
+  startDate: string;
+  endDate: string;
+  period?: RosterReportPeriod | string;
+  scope?: RosterReportScope | string;
+};
 
 type Severity = 'CRITICAL' | 'WARNING' | 'INFO';
 type Issue = {
@@ -577,18 +597,113 @@ export class RostersService {
 
   async exportWeekly(id: string) {
     const details = await this.weeklyDetails(id);
-    return this.workbookBuffer([
-      { name: 'Summary', rows: this.summaryRows(details) },
-      { name: 'Weekly Roster', rows: this.weeklyRosterRows(details) },
-      { name: 'Daily Coverage', rows: this.dailyCoverageRows(details) },
-      { name: 'Shift View', rows: this.shiftViewRows(details) },
-      { name: 'Designation Coverage', rows: this.designationCoverageRows(details) },
-      { name: 'Leave Impact', rows: this.leaveImpactRows(details) },
-      { name: 'Replacement Suggestions', rows: this.replacementRows(details) },
-      { name: 'Fairness', rows: this.fairnessRows(details) },
-      { name: 'Validation Issues', rows: ((details.validationSummary as any)?.issues ?? []) },
-      { name: 'Audit Overrides', rows: details.overrides ?? [] },
-    ]);
+    return this.rosterWorkbookBuffer([details], {
+      projectId: details.projectId ?? details.location?.projectId,
+      locationId: details.locationId,
+      startDate: dateKey(details.weekStart),
+      endDate: dateKey(details.weekEnd),
+      period: 'week',
+      scope: 'location',
+    });
+  }
+
+  async periodReport(params: RosterReportParams) {
+    const report = await this.loadRosterReport(params);
+    return {
+      period: report.period,
+      scope: report.scope,
+      project: report.project,
+      location: report.location,
+      startDate: dateKey(report.start),
+      endDate: dateKey(report.end),
+      weeks: report.details.map((details: any) => ({
+        id: details.id,
+        locationId: details.locationId,
+        location: details.location?.name,
+        project: details.location?.project?.name,
+        weekStart: dateKey(details.weekStart),
+        weekEnd: dateKey(details.weekEnd),
+        status: details.status,
+        eligibleEmployeeCount: details.eligibleEmployeeCount,
+        requiredDailyHeadcount: details.requiredDailyHeadcount,
+        requiredWeeklySlots: details.requiredWeeklySlots,
+        availableWeeklySlots: details.availableWeeklySlots,
+        extraOrShortageSlots: details.extraOrShortageSlots,
+        criticalIssues: details.validationSummary?.criticalCount ?? 0,
+        warnings: details.validationSummary?.warningCount ?? 0,
+      })),
+      summary: this.reportSummary(report.details, report.start, report.end),
+      calendarRows: this.periodCalendarRows(report.details, report.start, report.end),
+      dailyCoverage: this.periodDailyCoverageRows(report.details, report.start, report.end),
+      validationIssues: this.periodValidationRows(report.details),
+    };
+  }
+
+  async previewPeriod(dto: PeriodPreviewDto, actor: any) {
+    const context = await this.resolveRosterReportContext(dto);
+    const weekStarts = this.periodWeekStarts(context.start, context.end);
+    const refreshed: any[] = [];
+    const skipped: any[] = [];
+
+    for (const weekStart of weekStarts) {
+      for (const location of context.locations) {
+        const eligibleAtWeekStart = await this.prisma.employee.count({
+          where: {
+            projectId: context.projectId,
+            locationId: location.id,
+            status: EmployeeStatus.ACTIVE,
+            workforceCategory: WorkforceCategory.PRIMARY,
+            joinDate: { lte: weekStart },
+          },
+        });
+        if (eligibleAtWeekStart <= 0) {
+          skipped.push({
+            locationId: location.id,
+            location: location.name,
+            weekStart: dateKey(weekStart),
+            reason: 'No active primary employees at week start',
+          });
+          continue;
+        }
+
+        const result = await this.weeklyPreview({
+          projectId: context.projectId,
+          locationId: location.id,
+          weekStartDate: dateKey(weekStart),
+          mode: 'overwrite',
+        }, actor);
+        refreshed.push({
+          id: result.id,
+          locationId: location.id,
+          location: location.name,
+          weekStart: dateKey(weekStart),
+          status: result.status,
+          critical: result.validationSummary?.criticalCount ?? 0,
+          warning: result.validationSummary?.warningCount ?? 0,
+        });
+      }
+    }
+
+    return {
+      refreshedCount: refreshed.length,
+      skippedCount: skipped.length,
+      refreshed,
+      skipped,
+      report: await this.periodReport(dto),
+    };
+  }
+
+  async exportRosterReport(params: RosterReportParams) {
+    const report = await this.loadRosterReport(params);
+    return this.rosterWorkbookBuffer(report.details, {
+      ...params,
+      projectId: report.project?.id ?? params.projectId,
+      locationId: report.location?.id ?? params.locationId,
+      startDate: dateKey(report.start),
+      endDate: dateKey(report.end),
+      period: report.period,
+      scope: report.scope,
+    });
   }
 
   async createOverride(rosterWeekId: string, dto: OverrideDto, actor: any) {
@@ -1704,7 +1819,13 @@ export class RostersService {
     const existing = await this.prisma.rosterWeek.findUnique({
       where: { locationId_weekStart: { locationId: args.locationId, weekStart: args.weekStart } },
     });
-    if (existing?.lockedByUserId && existing.lockedByUserId !== args.actor?.userId && existing.lockedAt && addDays(existing.lockedAt, 1) > new Date()) {
+    if (
+      existing?.status === RosterWeekStatus.LOCKED &&
+      existing.lockedByUserId &&
+      existing.lockedByUserId !== args.actor?.userId &&
+      existing.lockedAt &&
+      addDays(existing.lockedAt, 1) > new Date()
+    ) {
       throw new ConflictException(`Roster week is locked by ${existing.lockedByEmail ?? 'another user'}`);
     }
 
@@ -1725,9 +1846,9 @@ export class RostersService {
         availableWeeklySlots: args.capacity.availableWeeklySlots,
         extraOrShortageSlots: args.capacity.extraOrShortageSlots,
         version: 1,
-        lockedByUserId: args.actor?.userId,
-        lockedByEmail: args.actor?.email,
-        lockedAt: new Date(),
+        lockedByUserId: null,
+        lockedByEmail: null,
+        lockedAt: null,
         generatedByUserId: args.actor?.userId,
         generatedByEmail: args.actor?.email,
         validationSummary: args.validationSummary,
@@ -1747,9 +1868,9 @@ export class RostersService {
         availableWeeklySlots: args.capacity.availableWeeklySlots,
         extraOrShortageSlots: args.capacity.extraOrShortageSlots,
         version: { increment: 1 },
-        lockedByUserId: args.actor?.userId,
-        lockedByEmail: args.actor?.email,
-        lockedAt: new Date(),
+        lockedByUserId: null,
+        lockedByEmail: null,
+        lockedAt: null,
         generatedByUserId: args.actor?.userId,
         generatedByEmail: args.actor?.email,
         validationSummary: args.validationSummary,
@@ -1837,13 +1958,480 @@ export class RostersService {
     return rosterWeek;
   }
 
-  private workbookBuffer(sheets: { name: string; rows: any[] }[]) {
-    const workbook = XLSX.utils.book_new();
-    for (const sheet of sheets) {
-      const rows = sheet.rows?.length ? sheet.rows : [{ message: 'No data' }];
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), sheet.name.slice(0, 31));
+  private async resolveRosterReportContext(params: RosterReportParams) {
+    if (!params.startDate || !params.endDate) throw new BadRequestException('startDate and endDate are required');
+    const start = startOfDay(parseISO(params.startDate));
+    const end = startOfDay(parseISO(params.endDate));
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || isBefore(end, start)) {
+      throw new BadRequestException('Invalid roster report date range');
     }
-    return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+    const period = ['week', 'month', 'three-month'].includes(String(params.period ?? '').toLowerCase())
+      ? String(params.period).toLowerCase() as RosterReportPeriod
+      : 'week';
+    const scope: RosterReportScope = String(params.scope ?? '').toLowerCase() === 'all' ? 'all' : 'location';
+    const selectedLocation = params.locationId
+      ? await this.prisma.location.findUnique({ where: { id: params.locationId }, include: { project: true } })
+      : null;
+    const projectId = params.projectId ?? selectedLocation?.projectId;
+    if (scope === 'location' && !params.locationId) throw new BadRequestException('locationId is required for selected-location roster reports');
+    if (!projectId) throw new BadRequestException('projectId is required for all-location roster reports');
+    const project = projectId ? await this.prisma.project.findUnique({ where: { id: projectId } }) : selectedLocation?.project ?? null;
+    const locations = scope === 'location'
+      ? selectedLocation ? [selectedLocation] : []
+      : await this.prisma.location.findMany({ where: { projectId }, orderBy: { name: 'asc' } });
+
+    return {
+      period,
+      scope,
+      start,
+      end,
+      projectId,
+      project,
+      location: scope === 'location' ? selectedLocation : null,
+      locations,
+    };
+  }
+
+  private periodWeekStarts(start: Date, end: Date) {
+    const starts: Date[] = [];
+    let cursor = startOfDay(start);
+    const day = getDay(cursor);
+    cursor = addDays(cursor, day === 0 ? -6 : 1 - day);
+    while (!isAfter(cursor, end)) {
+      starts.push(cursor);
+      cursor = addDays(cursor, 7);
+    }
+    return starts;
+  }
+
+  private async loadRosterReport(params: RosterReportParams) {
+    const context = await this.resolveRosterReportContext(params);
+    const and: any[] = [
+      { weekStart: { lte: context.end } },
+      { weekEnd: { gte: context.start } },
+      { OR: [{ projectId: context.projectId }, { location: { projectId: context.projectId } }] },
+    ];
+    if (context.scope === 'location') and.push({ locationId: params.locationId });
+
+    const weeks = await this.prisma.rosterWeek.findMany({
+      where: { AND: and },
+      select: { id: true },
+    });
+    const rawDetails = await Promise.all(weeks.map((week) => this.weeklyDetails(week.id)));
+    const details = rawDetails.filter((detailsItem: any) => (
+      Number(detailsItem.eligibleEmployeeCount ?? 0) > 0 ||
+      (detailsItem.weeklyAssignments ?? []).length > 0 ||
+      (detailsItem.dailyEntries ?? []).length > 0
+    ));
+    details.sort((a: any, b: any) => {
+      const locationCompare = String(a.location?.name ?? '').localeCompare(String(b.location?.name ?? ''));
+      if (locationCompare !== 0) return locationCompare;
+      return new Date(a.weekStart).getTime() - new Date(b.weekStart).getTime();
+    });
+
+    return {
+      period: context.period,
+      scope: context.scope,
+      start: context.start,
+      end: context.end,
+      project: context.project,
+      location: context.location,
+      details,
+    };
+  }
+
+  private reportSummary(details: any[], start: Date, end: Date) {
+    const entries = this.periodEntries(details, start, end);
+    const employeeKeys = new Set(entries.map((entry: any) => `${entry.locationId}:${entry.employeeId}`));
+    const requiredDailyHeadcount = this.requiredDailyHeadcountSummary(details);
+    return {
+      weeks: details.length,
+      locations: new Set(details.map((detailsItem: any) => detailsItem.locationId)).size,
+      employees: employeeKeys.size,
+      requiredDailyHeadcount: requiredDailyHeadcount.perLocation,
+      requiredDailyHeadcountTotal: requiredDailyHeadcount.total,
+      requiredDailyHeadcountCalculation: requiredDailyHeadcount.calculation,
+      criticalIssues: details.reduce((sum, detailsItem: any) => sum + Number(detailsItem.validationSummary?.criticalCount ?? 0), 0),
+      warnings: details.reduce((sum, detailsItem: any) => sum + Number(detailsItem.validationSummary?.warningCount ?? 0), 0),
+    };
+  }
+
+  private requiredDailyHeadcountSummary(details: any[]) {
+    const byLocation = new Map<string, number>();
+    for (const detailsItem of details) {
+      const locationKey = detailsItem.locationId ?? detailsItem.location?.id ?? detailsItem.location?.name;
+      if (!locationKey || byLocation.has(locationKey)) continue;
+      const required = Number(
+        detailsItem.requiredDailyHeadcount ??
+        detailsItem.validationSummary?.policy?.requiredDailyHeadcount ??
+        0,
+      );
+      if (Number.isFinite(required) && required > 0) byLocation.set(locationKey, required);
+    }
+
+    const values = Array.from(byLocation.values());
+    const total = values.reduce((sum, value) => sum + value, 0);
+    const uniqueValues = Array.from(new Set(values));
+    const perLocation = uniqueValues.length === 1 ? uniqueValues[0] : null;
+    const calculation = values.length === 0
+      ? '0'
+      : uniqueValues.length === 1
+        ? `${uniqueValues[0]} * ${values.length} = ${total}`
+        : `${values.join(' + ')} = ${total}`;
+
+    return {
+      perLocation,
+      locationCount: values.length,
+      total,
+      calculation,
+    };
+  }
+
+  private periodEntries(details: any[], start: Date, end: Date) {
+    const startTime = start.getTime();
+    const endTime = end.getTime();
+    return details.flatMap((detailsItem: any) => (detailsItem.dailyEntries ?? []).map((entry: any) => ({
+      ...entry,
+      project: detailsItem.location?.project,
+      projectId: detailsItem.projectId ?? detailsItem.location?.projectId,
+      location: detailsItem.location,
+      locationId: detailsItem.locationId,
+      rosterWeekId: detailsItem.id,
+      weekStart: dateKey(detailsItem.weekStart),
+      weekEnd: dateKey(detailsItem.weekEnd),
+    }))).filter((entry: any) => {
+      const date = typeof entry.date === 'string' ? startOfDay(parseISO(entry.date.slice(0, 10))) : startOfDay(entry.date);
+      const time = date.getTime();
+      return time >= startTime && time <= endTime;
+    });
+  }
+
+  private periodCalendarRows(details: any[], start: Date, end: Date) {
+    const dates = eachDayOfInterval({ start, end }).map(dateKey);
+    const rows = new Map<string, any>();
+    const ensureRow = (source: any, detailsItem: any) => {
+      const employee = source.employee;
+      if (!employee?.id) return null;
+      const key = `${detailsItem.locationId}:${employee.id}`;
+      if (!rows.has(key)) {
+        rows.set(key, {
+          key,
+          locationId: detailsItem.locationId,
+          location: detailsItem.location?.name ?? '',
+          project: detailsItem.location?.project?.name ?? '',
+          employeeId: employee.id,
+          employeeCode: employee.employeeCode ?? '',
+          employee: employee.name ?? '',
+          designation: employee.designation?.name ?? '',
+          days: Object.fromEntries(dates.map((date) => [date, null])),
+        });
+      }
+      return rows.get(key);
+    };
+
+    for (const detailsItem of details) {
+      for (const assignment of detailsItem.weeklyAssignments ?? []) ensureRow(assignment, detailsItem);
+      for (const entry of detailsItem.dailyEntries ?? []) {
+        const date = typeof entry.date === 'string' ? entry.date.slice(0, 10) : dateKey(entry.date);
+        if (!dates.includes(date)) continue;
+        const row = ensureRow(entry, detailsItem);
+        if (!row) continue;
+        row.days[date] = {
+          label: this.rosterEntryLabel(entry),
+          status: entry.status,
+          shiftCode: entry.shift?.code,
+          shiftName: entry.shift?.name,
+          rosterWeekId: detailsItem.id,
+        };
+      }
+    }
+    return Array.from(rows.values()).sort((a, b) => {
+      const locationCompare = String(a.location).localeCompare(String(b.location));
+      if (locationCompare !== 0) return locationCompare;
+      return String(a.employee).localeCompare(String(b.employee));
+    });
+  }
+
+  private periodDailyCoverageRows(details: any[], start: Date, end: Date) {
+    const rows: any[] = [];
+    for (const detailsItem of details) {
+      const weekStart = startOfDay(detailsItem.weekStart);
+      const weekEnd = startOfDay(detailsItem.weekEnd);
+      const rangeStart = isBefore(weekStart, start) ? start : weekStart;
+      const rangeEnd = isAfter(weekEnd, end) ? end : weekEnd;
+      for (const date of eachDayOfInterval({ start: rangeStart, end: rangeEnd }).map(dateKey)) {
+        for (const target of detailsItem.targetSummary ?? []) {
+          const actual = (detailsItem.dailyEntries ?? []).filter((entry: any) => {
+            const entryDate = typeof entry.date === 'string' ? entry.date.slice(0, 10) : dateKey(entry.date);
+            return entryDate === date && entry.shiftId === target.shiftId && entry.status === RosterStatus.SCHEDULED;
+          }).length;
+          const targetCount = Number(target.dailyTarget ?? target.target ?? 0);
+          rows.push({
+            location: detailsItem.location?.name,
+            weekStart: dateKey(detailsItem.weekStart),
+            date,
+            shift: target.shiftName ?? this.shiftLabel({ code: target.shiftCode }),
+            shiftCode: target.shiftCode,
+            actual,
+            target: targetCount,
+            variance: actual - targetCount,
+          });
+        }
+      }
+    }
+    return rows;
+  }
+
+  private periodValidationRows(details: any[]) {
+    return details.flatMap((detailsItem: any) => ((detailsItem.validationSummary as any)?.issues ?? []).map((issue: any) => ({
+      location: detailsItem.location?.name,
+      weekStart: dateKey(detailsItem.weekStart),
+      weekEnd: dateKey(detailsItem.weekEnd),
+      ...issue,
+    })));
+  }
+
+  private async rosterWorkbookBuffer(details: any[], params: RosterReportParams) {
+    const start = startOfDay(parseISO(params.startDate));
+    const end = startOfDay(parseISO(params.endDate));
+    const dates = eachDayOfInterval({ start, end }).map(dateKey);
+    const calendarRows = this.periodCalendarRows(details, start, end);
+    const periodLabel = String(params.period ?? 'week').toUpperCase();
+    const scopeLabel = String(params.scope ?? 'location').toLowerCase() === 'all' ? 'All locations' : 'Selected location';
+    const projectName = details[0]?.location?.project?.name ?? params.projectId ?? 'Project';
+    const locationName = String(params.scope ?? '').toLowerCase() === 'all'
+      ? 'All locations'
+      : details[0]?.location?.name ?? params.locationId ?? 'Selected location';
+    const requiredDailyHeadcount = this.requiredDailyHeadcountSummary(details);
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'RosterOps';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const matrixSheet = workbook.addWorksheet('Roster Matrix', {
+      views: [{ state: 'frozen', xSplit: 4, ySplit: 4, topLeftCell: 'E5', activeCell: 'E5' }],
+      properties: { defaultRowHeight: 24 },
+    });
+    const totalColumns = 4 + dates.length;
+    const border: Partial<ExcelJS.Borders> = {
+      top: { style: 'thin', color: { argb: 'CBD5E1' } },
+      left: { style: 'thin', color: { argb: 'CBD5E1' } },
+      bottom: { style: 'thin', color: { argb: 'CBD5E1' } },
+      right: { style: 'thin', color: { argb: 'CBD5E1' } },
+    };
+    const fillCell = (cell: ExcelJS.Cell, color: string) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: color } };
+    };
+
+    matrixSheet.mergeCells(1, 1, 1, Math.max(totalColumns, 6));
+    const titleCell = matrixSheet.getCell(1, 1);
+    titleCell.value = `${periodLabel} Roster Matrix`;
+    titleCell.font = { bold: true, size: 16, color: { argb: '0F172A' } };
+    titleCell.alignment = { vertical: 'middle', horizontal: 'left' };
+    matrixSheet.getRow(1).height = 30;
+
+    matrixSheet.mergeCells(2, 1, 2, Math.max(totalColumns, 6));
+    const metaCell = matrixSheet.getCell(2, 1);
+    metaCell.value = `Project: ${projectName}    Scope: ${scopeLabel}    Location: ${locationName}    Period: ${dateKey(start)} to ${dateKey(end)}    Generated: ${new Date().toLocaleString('en-IN')}`;
+    metaCell.font = { size: 10, color: { argb: '475569' } };
+    metaCell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+    matrixSheet.getRow(2).height = 24;
+
+    const headers = ['Location', 'Employee Code', 'Employee', 'Designation'];
+    matrixSheet.getRow(4).height = 32;
+    headers.forEach((header, index) => {
+      const cell = matrixSheet.getCell(4, index + 1);
+      cell.value = header;
+      cell.font = { bold: true, color: { argb: '0F172A' } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      cell.border = border;
+      fillCell(cell, 'E2E8F0');
+    });
+    dates.forEach((date, index) => {
+      const col = index + 5;
+      const cell = matrixSheet.getCell(4, col);
+      cell.value = format(parseISO(date), 'EEE dd MMM');
+      cell.font = { bold: true, color: { argb: '334155' } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      cell.border = border;
+      const day = parseISO(date).getDay();
+      fillCell(cell, [0, 6].includes(day) ? 'F1F5F9' : 'DBEAFE');
+      matrixSheet.getColumn(col).width = 13;
+    });
+    matrixSheet.getColumn(1).width = 22;
+    matrixSheet.getColumn(2).width = 16;
+    matrixSheet.getColumn(3).width = 28;
+    matrixSheet.getColumn(4).width = 30;
+
+    const firstDataRow = 5;
+    const lastFilterRow = firstDataRow + Math.max(calendarRows.length, 1) - 1;
+    matrixSheet.autoFilter = {
+      from: { row: 4, column: 1 },
+      to: { row: lastFilterRow, column: totalColumns },
+    };
+    calendarRows.forEach((row, rowIndex) => {
+      const rowNumber = firstDataRow + rowIndex;
+      const sheetRow = matrixSheet.getRow(rowNumber);
+      sheetRow.height = 26;
+      const baseValues = [row.location, row.employeeCode, row.employee, row.designation];
+      baseValues.forEach((value, index) => {
+        const cell = matrixSheet.getCell(rowNumber, index + 1);
+        cell.value = value;
+        cell.border = border;
+        cell.alignment = { vertical: 'middle', horizontal: index < 2 ? 'center' : 'left', wrapText: true };
+        if (index === 2) cell.font = { bold: true, color: { argb: '0F172A' } };
+        fillCell(cell, rowIndex % 2 === 0 ? 'FFFFFF' : 'F8FAFC');
+      });
+      dates.forEach((date, dateIndex) => {
+        const day = row.days?.[date];
+        const cell = matrixSheet.getCell(rowNumber, dateIndex + 5);
+        cell.value = day?.label ?? '';
+        cell.font = { bold: Boolean(day?.label), color: { argb: '0F172A' } };
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        cell.border = border;
+        fillCell(cell, this.rosterCellFill(day?.status, day?.shiftCode, rowIndex));
+      });
+    });
+
+    const policyTargetRow = firstDataRow + Math.max(calendarRows.length, 1);
+    matrixSheet.getRow(policyTargetRow).height = 34;
+    matrixSheet.mergeCells(policyTargetRow, 1, policyTargetRow, 4);
+    const policyTargetLabel = matrixSheet.getCell(policyTargetRow, 1);
+    policyTargetLabel.value = 'Required Daily Headcount Total';
+    policyTargetLabel.font = { bold: true, color: { argb: '0F172A' } };
+    policyTargetLabel.alignment = { vertical: 'middle', horizontal: 'left' };
+    policyTargetLabel.border = border;
+    fillCell(policyTargetLabel, 'DBEAFE');
+    dates.forEach((_, index) => {
+      const cell = matrixSheet.getCell(policyTargetRow, index + 5);
+      cell.value = requiredDailyHeadcount.total;
+      cell.font = { bold: true, size: 12, color: { argb: '1D4ED8' } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center' };
+      cell.border = border;
+      fillCell(cell, 'EFF6FF');
+    });
+
+    if (calendarRows.length === 0) {
+      matrixSheet.mergeCells(firstDataRow, 1, firstDataRow, Math.max(totalColumns, 6));
+      const emptyCell = matrixSheet.getCell(firstDataRow, 1);
+      emptyCell.value = 'No roster weeks found for this period. Preview or publish weekly rosters first, then export the period report.';
+      emptyCell.font = { color: { argb: '64748B' } };
+      emptyCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      emptyCell.border = border;
+      fillCell(emptyCell, 'F8FAFC');
+    }
+
+    this.addJsonWorksheet(workbook, 'Report Summary', [this.reportSummary(details, start, end)]);
+    this.addJsonWorksheet(workbook, 'Weekly Summary', details.map((detailsItem: any) => this.summaryRows(detailsItem)[0]));
+    this.addJsonWorksheet(workbook, 'Daily Coverage', this.periodDailyCoverageRows(details, start, end));
+    this.addJsonWorksheet(workbook, 'Roster Entries', this.periodEntries(details, start, end).map((entry: any) => ({
+      location: entry.location?.name,
+      weekStart: entry.weekStart,
+      date: typeof entry.date === 'string' ? entry.date.slice(0, 10) : dateKey(entry.date),
+      employeeCode: entry.employee?.employeeCode,
+      employee: entry.employee?.name,
+      designation: entry.employee?.designation?.name,
+      shift: entry.shift?.name,
+      shiftCode: entry.shift?.code,
+      status: entry.status,
+      entryType: entry.entryType,
+      notes: entry.notes,
+    })));
+    this.addJsonWorksheet(workbook, 'Replacement Suggestions', details.flatMap((detailsItem: any) => this.replacementRows(detailsItem).map((row) => ({
+      location: detailsItem.location?.name,
+      weekStart: dateKey(detailsItem.weekStart),
+      ...row,
+    }))));
+    this.addJsonWorksheet(workbook, 'Fairness', details.flatMap((detailsItem: any) => this.fairnessRows(detailsItem).map((row) => ({
+      location: detailsItem.location?.name,
+      weekStart: dateKey(detailsItem.weekStart),
+      ...row,
+    }))));
+    this.addJsonWorksheet(workbook, 'Validation Issues', this.periodValidationRows(details));
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
+  }
+
+  private addJsonWorksheet(workbook: ExcelJS.Workbook, name: string, rows: any[]) {
+    const sheet = workbook.addWorksheet(name.slice(0, 31));
+    const safeRows = rows.length ? rows : [{ message: 'No data' }];
+    const keys = Array.from(safeRows.reduce<Set<string>>((set, row: any) => {
+      Object.keys(row ?? {}).forEach((key) => set.add(key));
+      return set;
+    }, new Set<string>()));
+    sheet.columns = keys.map((key) => ({
+      header: key.replace(/([A-Z])/g, ' $1').replace(/^./, (value) => value.toUpperCase()),
+      key,
+      width: Math.min(42, Math.max(14, key.length + 6)),
+    }));
+    sheet.addRows(safeRows);
+    this.formatRosterWorksheet(sheet);
+  }
+
+  private formatRosterWorksheet(sheet: ExcelJS.Worksheet) {
+    sheet.views = [{ state: 'frozen', ySplit: 1, topLeftCell: 'A2', activeCell: 'A2' }];
+    const border: Partial<ExcelJS.Borders> = {
+      top: { style: 'thin', color: { argb: 'CBD5E1' } },
+      left: { style: 'thin', color: { argb: 'CBD5E1' } },
+      bottom: { style: 'thin', color: { argb: 'CBD5E1' } },
+      right: { style: 'thin', color: { argb: 'CBD5E1' } },
+    };
+    sheet.getRow(1).height = 24;
+    sheet.getRow(1).eachCell((cell) => {
+      cell.font = { bold: true, color: { argb: '0F172A' } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'E2E8F0' } };
+      cell.border = border;
+    });
+    sheet.eachRow((row, rowNumber) => {
+      if (rowNumber > 1) row.height = 22;
+      row.eachCell((cell) => {
+        cell.alignment = { vertical: 'middle', horizontal: rowNumber === 1 ? 'center' : 'left', wrapText: true };
+        cell.border = border;
+      });
+    });
+    sheet.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: Math.max(1, sheet.rowCount), column: Math.max(1, sheet.columnCount) },
+    };
+  }
+
+  private rosterCellFill(status?: string, shiftCode?: string, rowIndex = 0) {
+    if (status === RosterStatus.SCHEDULED) {
+      if (shiftCode === ShiftCode.A) return 'E0F2FE';
+      if (shiftCode === ShiftCode.B) return 'FEF3C7';
+      if (shiftCode === ShiftCode.C) return 'EDE9FE';
+      if (shiftCode === ShiftCode.G) return 'DCFCE7';
+      return 'F1F5F9';
+    }
+    if (status === RosterStatus.WEEKLY_OFF) return 'F1F5F9';
+    if (status === RosterStatus.ON_LEAVE) return 'FEE2E2';
+    if (status === RosterStatus.GENERAL) return 'CCFBF1';
+    if (status === RosterStatus.REPLACEMENT) return 'DCFCE7';
+    if (status === RosterStatus.EXTRA_DUTY) return 'DBEAFE';
+    return rowIndex % 2 === 0 ? 'FFFFFF' : 'F8FAFC';
+  }
+
+  private rosterEntryLabel(entry: any) {
+    if (entry.status === RosterStatus.SCHEDULED) return this.shiftLabel(entry.shift);
+    if (entry.status === RosterStatus.WEEKLY_OFF) return 'OFF';
+    if (entry.status === RosterStatus.ON_LEAVE) return 'LEAVE';
+    if (entry.status === RosterStatus.GENERAL) return 'GEN';
+    if (entry.status === RosterStatus.REPLACEMENT) return 'REPL';
+    if (entry.status === RosterStatus.EXTRA_DUTY) return 'EXTRA';
+    return String(entry.status ?? '');
+  }
+
+  private shiftLabel(shift: any) {
+    const code = String(shift?.code ?? '').toUpperCase();
+    if (code === ShiftCode.A) return 'Morning';
+    if (code === ShiftCode.B) return 'Afternoon';
+    if (code === ShiftCode.C) return 'Night';
+    if (code === ShiftCode.G) return 'General';
+    return shift?.name ?? code;
   }
 
   private summaryRows(details: any) {
@@ -2092,6 +2680,41 @@ export class RostersController {
   weekly(@Query('locationId') locationId: string, @Query('weekStart') weekStart: string) {
     if (!locationId || !weekStart) return null;
     return this.svc.findWeekly(locationId, weekStart);
+  }
+
+  @Get('period')
+  periodReport(
+    @Query('projectId') projectId: string,
+    @Query('locationId') locationId: string,
+    @Query('startDate') startDate: string,
+    @Query('endDate') endDate: string,
+    @Query('period') period?: string,
+    @Query('scope') scope?: string,
+  ) {
+    return this.svc.periodReport({ projectId, locationId, startDate, endDate, period, scope });
+  }
+
+  @Roles(UserRole.ADMIN, UserRole.ROSTER_MANAGER, UserRole.PROJECT_MANAGER)
+  @Post('period/preview')
+  previewPeriod(@Body() dto: PeriodPreviewDto, @CurrentUser() user: any) {
+    return this.svc.previewPeriod(dto, user);
+  }
+
+  @Get('export.xlsx')
+  async exportRosterReport(
+    @Query('projectId') projectId: string,
+    @Query('locationId') locationId: string,
+    @Query('startDate') startDate: string,
+    @Query('endDate') endDate: string,
+    @Query('period') period: string,
+    @Query('scope') scope: string,
+    @Res() res: Response,
+  ) {
+    const buffer = await this.svc.exportRosterReport({ projectId, locationId, startDate, endDate, period, scope });
+    const scopeLabel = scope === 'all' ? 'all-locations' : 'selected-location';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="roster-${period || 'period'}-${scopeLabel}-${startDate}-to-${endDate}.xlsx"`);
+    res.send(buffer);
   }
 
   @Get('weekly/:id')

@@ -1404,6 +1404,7 @@ export class RosterPoliciesService {
         );
       }
     }
+    this.ensureAvailableLocationDesignationsRepresented(rows, projectShiftDesignationTotals, locationDesignationTotals);
 
     const normalized = new Map<string, number>();
     for (const row of rows) {
@@ -1472,6 +1473,7 @@ export class RosterPoliciesService {
         );
       }
     }
+    this.ensureAvailableLocationDesignationsRepresented(rows, projectShiftDesignationTotals, locationDesignationTotals);
 
     const byLocation = new Map<string, AppliedRequirementRow[]>();
     for (const row of rows.filter((item) => item.count > 0)) {
@@ -1546,6 +1548,78 @@ export class RosterPoliciesService {
         return a.designationName.localeCompare(b.designationName);
       });
       increment(candidates[0]);
+    }
+  }
+
+  private ensureAvailableLocationDesignationsRepresented(
+    rows: AppliedRequirementRow[],
+    projectShiftDesignationTotals: Map<string, number>,
+    locationDesignationTotals: Map<string, number>,
+  ) {
+    const byLocationDesignation = new Map<string, AppliedRequirementRow[]>();
+    for (const row of rows) {
+      const key = `${row.locationId}:${row.designationId}`;
+      byLocationDesignation.set(key, [...(byLocationDesignation.get(key) ?? []), row]);
+    }
+
+    const projectKey = (row: AppliedRequirementRow) => `${row.shiftCode}:${row.designationId}`;
+    const locationDesignationKey = (row: AppliedRequirementRow) => `${row.locationId}:${row.designationId}`;
+    const decrement = (row: AppliedRequirementRow) => {
+      row.count -= 1;
+      projectShiftDesignationTotals.set(projectKey(row), Math.max(0, (projectShiftDesignationTotals.get(projectKey(row)) ?? 0) - 1));
+      locationDesignationTotals.set(locationDesignationKey(row), Math.max(0, (locationDesignationTotals.get(locationDesignationKey(row)) ?? 0) - 1));
+    };
+    const increment = (row: AppliedRequirementRow) => {
+      row.count += 1;
+      projectShiftDesignationTotals.set(projectKey(row), (projectShiftDesignationTotals.get(projectKey(row)) ?? 0) + 1);
+      locationDesignationTotals.set(locationDesignationKey(row), (locationDesignationTotals.get(locationDesignationKey(row)) ?? 0) + 1);
+    };
+
+    const emptyAvailableGroups = Array.from(byLocationDesignation.entries())
+      .map(([key, groupRows]) => ({
+        key,
+        groupRows,
+        availableCount: Math.max(...groupRows.map((row) => row.availableCount)),
+        currentCount: groupRows.reduce((sum, row) => sum + row.count, 0),
+      }))
+      .filter((group) => group.availableCount > 0 && group.currentCount <= 0)
+      .sort((a, b) => {
+        const criticalDiff = Number(b.groupRows.some((row) => row.isCritical)) - Number(a.groupRows.some((row) => row.isCritical));
+        if (criticalDiff !== 0) return criticalDiff;
+        const levelDiff = Math.max(...b.groupRows.map((row) => row.designationLevel)) - Math.max(...a.groupRows.map((row) => row.designationLevel));
+        if (levelDiff !== 0) return levelDiff;
+        return String(a.groupRows[0]?.designationName ?? '').localeCompare(String(b.groupRows[0]?.designationName ?? ''));
+      });
+
+    for (const group of emptyAvailableGroups) {
+      const targets = group.groupRows
+        .filter((row) => !row.manualLocked && row.availableCount > 0)
+        .sort((a, b) => {
+          const projectDiff = (projectShiftDesignationTotals.get(projectKey(a)) ?? 0) - (projectShiftDesignationTotals.get(projectKey(b)) ?? 0);
+          if (projectDiff !== 0) return projectDiff;
+          return a.shiftCode.localeCompare(b.shiftCode);
+        });
+
+      for (const target of targets) {
+        const donor = rows
+          .filter((row) => row.locationId === target.locationId && row.shiftId === target.shiftId)
+          .filter((row) => row.designationId !== target.designationId)
+          .filter((row) => !row.manualLocked && row.count > 0)
+          .filter((row) => (projectShiftDesignationTotals.get(projectKey(row)) ?? 0) > 1)
+          .filter((row) => (locationDesignationTotals.get(locationDesignationKey(row)) ?? 0) > 1)
+          .sort((a, b) => {
+            if (Number(a.isCritical) !== Number(b.isCritical)) return Number(a.isCritical) - Number(b.isCritical);
+            if (b.count !== a.count) return b.count - a.count;
+            const locationTotalDiff = (locationDesignationTotals.get(locationDesignationKey(b)) ?? 0) - (locationDesignationTotals.get(locationDesignationKey(a)) ?? 0);
+            if (locationTotalDiff !== 0) return locationTotalDiff;
+            if (a.designationLevel !== b.designationLevel) return a.designationLevel - b.designationLevel;
+            return a.designationName.localeCompare(b.designationName);
+          })[0];
+        if (!donor) continue;
+        decrement(donor);
+        increment(target);
+        break;
+      }
     }
   }
 

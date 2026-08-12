@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
-import { addDays, format, parseISO, startOfWeek } from 'date-fns';
+import { addDays, addMonths, endOfMonth, format, parseISO, startOfMonth, startOfWeek } from 'date-fns';
 import {
   AlertTriangle, CalendarDays, CheckCircle2, Download, Eye, Layers3, Loader2,
   MapPin, RotateCcw, ShieldAlert, Sparkles, Users,
@@ -30,6 +30,11 @@ const statusTone: Record<string, string> = {
   ON_LEAVE: 'bg-rose-50 text-rose-700 border-rose-200',
 };
 const viewModes = ['Weekly Matrix', 'By Shift', 'Daily Coverage', 'Designation Coverage', 'Leave Impact', 'Replacement Suggestions', 'Fairness'];
+const periodOptions = [
+  { value: 'week', label: 'Weekly' },
+  { value: 'month', label: 'Monthly' },
+  { value: 'three-month', label: '3 Months' },
+];
 
 function dayKey(value: any) {
   if (!value) return '';
@@ -69,8 +74,11 @@ export default function RosterPage() {
   const [projectId, setProjectId] = useState('');
   const [locationId, setLocationId] = useState('');
   const [weekStart, setWeekStart] = useState(format(startOfWeek(new Date(), { weekStartsOn: 1 }), 'yyyy-MM-dd'));
+  const [periodMode, setPeriodMode] = useState<'week' | 'month' | 'three-month'>('week');
+  const [exportScope, setExportScope] = useState<'location' | 'all'>('location');
   const [viewMode, setViewMode] = useState('Weekly Matrix');
   const [rosterWeek, setRosterWeek] = useState<any>(null);
+  const [periodReport, setPeriodReport] = useState<any>(null);
   const [policy, setPolicy] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -82,12 +90,39 @@ export default function RosterPage() {
   const selectedProject = projects.find((project) => project.id === projectId);
   const selectedLocation = locations.find((location) => location.id === locationId);
   const weekEnd = useMemo(() => format(addDays(parseISO(weekStart), 6), 'yyyy-MM-dd'), [weekStart]);
+  const periodStart = useMemo(() => {
+    const anchor = parseISO(weekStart);
+    if (periodMode === 'month') return format(startOfMonth(anchor), 'yyyy-MM-dd');
+    if (periodMode === 'three-month') return format(startOfMonth(anchor), 'yyyy-MM-dd');
+    return weekStart;
+  }, [periodMode, weekStart]);
+  const periodEnd = useMemo(() => {
+    const anchor = parseISO(weekStart);
+    if (periodMode === 'month') return format(endOfMonth(anchor), 'yyyy-MM-dd');
+    if (periodMode === 'three-month') return format(addDays(addMonths(startOfMonth(anchor), 3), -1), 'yyyy-MM-dd');
+    return weekEnd;
+  }, [periodMode, weekEnd, weekStart]);
   const days = useMemo(() => Array.from({ length: 7 }, (_, idx) => format(addDays(parseISO(weekStart), idx), 'yyyy-MM-dd')), [weekStart]);
+  const periodDays = useMemo(() => {
+    const start = parseISO(periodStart);
+    const end = parseISO(periodEnd);
+    const count = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000) + 1);
+    return Array.from({ length: count }, (_, idx) => format(addDays(start, idx), 'yyyy-MM-dd'));
+  }, [periodStart, periodEnd]);
+  const visiblePeriodDays = useMemo(() => {
+    if (periodMode === 'week' || !periodReport?.calendarRows?.length) return periodDays;
+    const activeDays = periodDays.filter((day) => periodReport.calendarRows.some((row: any) => row.days?.[day]?.label));
+    if (!activeDays.length) return periodDays;
+    return periodDays.slice(periodDays.indexOf(activeDays[0]), periodDays.indexOf(activeDays[activeDays.length - 1]) + 1);
+  }, [periodDays, periodMode, periodReport]);
   const entries = rosterWeek?.dailyEntries ?? rosterWeek?.rosterEntries ?? [];
   const assignments = rosterWeek?.weeklyAssignments ?? [];
   const targetSummary = rosterWeek?.targetSummary ?? rosterWeek?.validationSummary?.targetSummary ?? [];
-  const issues = rosterWeek?.validationSummary?.issues ?? [];
-  const hasCritical = (rosterWeek?.validationSummary?.criticalCount ?? 0) > 0;
+  const issues = periodMode === 'week' ? rosterWeek?.validationSummary?.issues ?? [] : periodReport?.validationIssues ?? [];
+  const hasCritical = periodMode === 'week'
+    ? (rosterWeek?.validationSummary?.criticalCount ?? 0) > 0
+    : (periodReport?.summary?.criticalIssues ?? 0) > 0;
+  const hasRosterData = periodMode === 'week' ? Boolean(rosterWeek) : Boolean(periodReport);
 
   useEffect(() => {
     api.get('/projects').then((projectData) => {
@@ -106,15 +141,43 @@ export default function RosterPage() {
   }, [projectId]);
 
   useEffect(() => {
-    if (!locationId) return;
+    if (!projectId || !locationId) return;
+    const policyRequest = api.get(`/roster-policies?projectId=${projectId}&locationId=${locationId}`);
+    if (periodMode === 'week') {
+      Promise.all([
+        policyRequest,
+        api.get(`/roster/weekly?locationId=${locationId}&weekStart=${weekStart}`),
+      ]).then(([policyData, roster]) => {
+        setPolicy(policyData?.[0] ?? null);
+        setRosterWeek(roster);
+        setPeriodReport(null);
+      }).catch(() => {
+        setRosterWeek(null);
+        setPeriodReport(null);
+      });
+      return;
+    }
+
+    const params = new URLSearchParams({
+      projectId,
+      startDate: periodStart,
+      endDate: periodEnd,
+      period: periodMode,
+      scope: exportScope,
+    });
+    if (exportScope === 'location') params.set('locationId', locationId);
     Promise.all([
-      api.get(`/roster-policies?projectId=${projectId}&locationId=${locationId}`),
-      api.get(`/roster/weekly?locationId=${locationId}&weekStart=${weekStart}`),
-    ]).then(([policyData, roster]) => {
+      policyRequest,
+      api.get(`/roster/period?${params.toString()}`),
+    ]).then(([policyData, report]) => {
       setPolicy(policyData?.[0] ?? null);
-      setRosterWeek(roster);
-    }).catch(() => setRosterWeek(null));
-  }, [projectId, locationId, weekStart]);
+      setRosterWeek(null);
+      setPeriodReport(report);
+    }).catch(() => {
+      setRosterWeek(null);
+      setPeriodReport(null);
+    });
+  }, [projectId, locationId, weekStart, periodMode, periodStart, periodEnd, exportScope]);
 
   const filteredEntries = entries;
   const filteredAssignments = useMemo(() => sortRows(assignments, 'employee.name', 'asc'), [assignments]);
@@ -129,6 +192,21 @@ export default function RosterPage() {
     if (!projectId || !locationId) return toast('Select project and location', 'error');
     setLoading(true);
     try {
+      if (periodMode !== 'week') {
+        const body: any = {
+          projectId,
+          startDate: periodStart,
+          endDate: periodEnd,
+          period: periodMode,
+          scope: exportScope,
+        };
+        if (exportScope === 'location') body.locationId = locationId;
+        const result = await api.post('/roster/period/preview', body);
+        setRosterWeek(null);
+        setPeriodReport(result.report);
+        toast(`Period ready: ${result.refreshedCount ?? 0} week(s) refreshed`, 'success');
+        return;
+      }
       const data = await api.post('/roster/weekly/preview', { projectId, locationId, weekStartDate: weekStart, mode: 'overwrite' });
       setRosterWeek(data);
       const critical = data.validationSummary?.criticalCount ?? 0;
@@ -155,11 +233,23 @@ export default function RosterPage() {
   };
 
   const regenerateRoster = async () => {
+    if (periodMode !== 'week') return previewRoster();
     if (!rosterWeek?.id) return previewRoster();
     setLoading(true);
     try {
       const data = await api.post(`/roster/weekly/${rosterWeek.id}/regenerate`);
       setRosterWeek(data);
+      if (periodMode !== 'week') {
+        const params = new URLSearchParams({
+          projectId,
+          startDate: periodStart,
+          endDate: periodEnd,
+          period: periodMode,
+          scope: exportScope,
+        });
+        if (exportScope === 'location') params.set('locationId', locationId);
+        setPeriodReport(await api.get(`/roster/period?${params.toString()}`));
+      }
       toast('Roster regenerated', 'success');
     } catch (e: any) {
       toast(e.message, 'error');
@@ -169,9 +259,19 @@ export default function RosterPage() {
   };
 
   const exportRoster = async () => {
-    if (!rosterWeek?.id) return toast('Preview a roster before export', 'error');
-    const blob = await apiBlob(`/roster/weekly/${rosterWeek.id}/export.xlsx`);
-    saveBlob(blob, `roster-${selectedLocation?.name ?? 'location'}-${weekStart}.xlsx`);
+    if (!projectId) return toast('Select project before export', 'error');
+    if (exportScope === 'location' && !locationId) return toast('Select location before export', 'error');
+    const params = new URLSearchParams({
+      projectId,
+      startDate: periodStart,
+      endDate: periodEnd,
+      period: periodMode,
+      scope: exportScope,
+    });
+    if (exportScope === 'location') params.set('locationId', locationId);
+    const blob = await apiBlob(`/roster/export.xlsx?${params.toString()}`);
+    const scopeLabel = exportScope === 'all' ? 'all-locations' : selectedLocation?.name ?? 'location';
+    saveBlob(blob, `roster-${periodMode}-${scopeLabel}-${periodStart}-to-${periodEnd}.xlsx`);
   };
 
   const requestOverride = async () => {
@@ -191,18 +291,25 @@ export default function RosterPage() {
     }
   };
 
-  const summaryCards = [
+  const summaryCards = periodMode === 'week' ? [
     ['Eligible', rosterWeek?.eligibleEmployeeCount ?? policy?._count?.employees ?? selectedLocation?._count?.employees ?? '--'],
     ['Daily Headcount', rosterWeek?.requiredDailyHeadcount ?? policy?.requiredDailyHeadcount ?? '--'],
     ['Required Slots', rosterWeek?.requiredWeeklySlots ?? '--'],
     ['Available Slots', rosterWeek?.availableWeeklySlots ?? '--'],
     ['Extra/Shortage', rosterWeek?.extraOrShortageSlots ?? '--'],
     ['Fairness', rosterWeek?.fairnessSummary?.score ?? '--'],
+  ] : [
+    ['Weeks', periodReport?.summary?.weeks ?? 0],
+    ['Locations', periodReport?.summary?.locations ?? 0],
+    ['Employees', periodReport?.summary?.employees ?? 0],
+    ['Daily Headcount', periodReport?.summary?.requiredDailyHeadcount ?? policy?.requiredDailyHeadcount ?? '--'],
+    ['Required Total', periodReport?.summary?.requiredDailyHeadcountCalculation ?? periodReport?.summary?.requiredDailyHeadcountTotal ?? '--'],
+    ['Warnings', periodReport?.summary?.warnings ?? 0],
   ];
 
   return (
     <>
-      <Topbar title="Weekly Roster" subtitle={`${selectedLocation?.name ?? 'Select location'} / ${weekStart} to ${weekEnd}`} />
+      <Topbar title="Roster" subtitle={`${selectedLocation?.name ?? 'Select location'} / ${periodStart} to ${periodEnd}`} />
       <main className="space-y-4 p-3 md:p-5">
         <Card className="rounded-lg">
           <CardContent className="p-4 md:p-5">
@@ -211,13 +318,13 @@ export default function RosterPage() {
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                   <div>
                     <div className="text-sm font-semibold">Roster setup</div>
-                    <div className="text-xs text-muted-foreground">{weekStart} to {weekEnd}</div>
+                    <div className="text-xs text-muted-foreground">{periodStart} to {periodEnd}</div>
                   </div>
-                  <Badge variant={hasCritical ? 'destructive' : rosterWeek ? 'success' : 'outline'}>
-                    {hasCritical ? 'Action required' : rosterWeek ? 'Preview ready' : 'No preview'}
+                  <Badge variant={hasCritical ? 'destructive' : hasRosterData ? 'success' : 'outline'}>
+                    {hasCritical ? 'Action required' : hasRosterData ? 'Report ready' : 'No preview'}
                   </Badge>
                 </div>
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[1.2fr_1.1fr_.8fr_1fr]">
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[1.1fr_1fr_.75fr_.85fr_.9fr_.9fr]">
                   <div className="space-y-1.5">
                     <Label>Project</Label>
                     <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
@@ -231,8 +338,21 @@ export default function RosterPage() {
                     </Select>
                   </div>
                   <div className="space-y-1.5">
-                    <Label>Week start</Label>
+                    <Label>{periodMode === 'week' ? 'Week start' : 'Period anchor'}</Label>
                     <Input type="date" value={weekStart} onChange={(e) => setWeekStart(e.target.value)} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Period</Label>
+                    <Select value={periodMode} onChange={(e) => setPeriodMode(e.target.value as any)}>
+                      {periodOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Scope</Label>
+                    <Select value={exportScope} onChange={(e) => setExportScope(e.target.value as any)}>
+                      <option value="location">Selected location</option>
+                      <option value="all">All locations</option>
+                    </Select>
                   </div>
                   <div className="space-y-1.5">
                     <Label>View</Label>
@@ -251,14 +371,14 @@ export default function RosterPage() {
                 <div className="space-y-2">
                   <Button className="h-10 w-full justify-start" onClick={previewRoster} disabled={loading}>
                     {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-                    Preview roster
+                    {periodMode === 'week' ? 'Preview roster' : 'Preview period'}
                   </Button>
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
                     <Button className="h-10 justify-start" variant="outline" onClick={regenerateRoster}>
                       <RotateCcw className="mr-2 h-4 w-4" />Regenerate
                     </Button>
                     <Button className="h-10 justify-start" variant="outline" onClick={exportRoster}>
-                      <Download className="mr-2 h-4 w-4" />Export
+                      <Download className="mr-2 h-4 w-4" />Export report
                     </Button>
                   </div>
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
@@ -276,7 +396,7 @@ export default function RosterPage() {
           </CardContent>
         </Card>
 
-        {rosterWeek && (
+        {(periodMode === 'week' ? rosterWeek : periodReport) && (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
             {summaryCards.map(([label, value]) => (
               <div key={label} className="rounded-lg border bg-background px-4 py-3">
@@ -341,6 +461,19 @@ export default function RosterPage() {
   );
 
   function renderView() {
+    if (periodMode !== 'week') {
+      if (!periodReport) {
+        return (
+          <Card>
+            <CardContent className="py-16 text-center text-muted-foreground">
+              No roster data for the selected {periodMode}.
+            </CardContent>
+          </Card>
+        );
+      }
+      return <PeriodMatrix rows={periodReport.calendarRows ?? []} days={visiblePeriodDays} periodMode={periodMode} />;
+    }
+
     if (!rosterWeek) {
       return (
         <Card>
@@ -399,6 +532,64 @@ function WeeklyMatrix({ assignments, days, entryByEmployeeDay, onExplain }: any)
                   );
                 })}
                 <td className="border-b p-2 text-center"><Button size="icon" variant="ghost" onClick={() => onExplain(assignment)}><Eye className="h-4 w-4" /></Button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
+  );
+}
+
+function PeriodMatrix({ rows, days, periodMode }: any) {
+  const title = periodMode === 'month' ? 'Monthly Matrix' : '3 Month Matrix';
+  return (
+    <Card className="rounded-lg">
+      <CardHeader className="flex-row items-center justify-between p-4 pb-3">
+        <div>
+          <CardTitle className="flex items-center gap-2 text-base"><CalendarDays className="h-4 w-4" />{title}</CardTitle>
+          <CardDescription>Combined from saved weekly rosters in the selected period.</CardDescription>
+        </div>
+        <Badge variant="outline">{rows.length} employees</Badge>
+      </CardHeader>
+      <CardContent className="max-h-[calc(100vh-300px)] min-h-[420px] overflow-auto p-0">
+        <table className="min-w-full text-xs">
+          <thead className="sticky top-0 z-20 bg-card">
+            <tr>
+              <th className="sticky left-0 z-30 min-w-[280px] border-b bg-card p-3 text-left">Employee</th>
+              {days.map((day: string) => (
+                <th key={day} className="min-w-[86px] border-b p-3 text-center">
+                  {format(parseISO(day), periodMode === 'three-month' ? 'dd MMM' : 'EEE dd')}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={days.length + 1} className="p-10 text-center text-muted-foreground">
+                  No roster rows found for this period.
+                </td>
+              </tr>
+            )}
+            {rows.map((row: any) => (
+              <tr key={row.key} className="hover:bg-muted/40">
+                <td className="sticky left-0 z-10 border-b bg-card p-3">
+                  <div className="font-medium">{row.employee}</div>
+                  <div className="text-[10px] text-muted-foreground">{row.location} / {row.employeeCode} / {row.designation}</div>
+                </td>
+                {days.map((day: string) => {
+                  const cell = row.days?.[day];
+                  return (
+                    <td key={day} className="border-b p-2 text-center">
+                      {cell?.label ? (
+                        <span className={`inline-flex min-w-16 justify-center rounded-md border px-2 py-1.5 font-semibold ${rosterCellTone(cell.status, cell.shiftCode)}`}>{cell.label}</span>
+                      ) : (
+                        <span className="inline-flex min-w-16 justify-center rounded-md border border-transparent px-2 py-1.5 text-muted-foreground">-</span>
+                      )}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
