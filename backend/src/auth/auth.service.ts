@@ -112,6 +112,10 @@ export class AuthService {
       email: user.email,
       role: user.role,
       employeeId: user.employeeId,
+      // Snapshot of the linked employee's location at login time - drives
+      // location-scoped visibility (see auth/location-access.ts). Changing
+      // an employee's location takes effect on their next login.
+      locationId: user.employee?.locationId ?? null,
     });
   }
 

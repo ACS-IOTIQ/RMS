@@ -4,6 +4,7 @@ import {
   ConflictException,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   Injectable,
   Module,
@@ -13,7 +14,7 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
-import { IsDateString, IsEnum, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsArray, IsDateString, IsEnum, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 import { createHash } from 'crypto';
 import {
   addDays,
@@ -50,6 +51,7 @@ import { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser, Roles, RolesGuard } from '../auth/roles.guard';
+import { getAllowedLocationIds } from '../auth/location-access';
 import { RosterPoliciesModule, RosterPoliciesService } from '../roster-policies/roster-policies.module';
 
 class GenerateDto {
@@ -77,6 +79,7 @@ class WeeklyPreviewDto {
 class PeriodPreviewDto {
   @IsOptional() @IsString() projectId?: string;
   @IsOptional() @IsString() locationId?: string;
+  @IsOptional() @IsArray() @IsString({ each: true }) locationIds?: string[];
   @IsDateString() startDate: string;
   @IsDateString() endDate: string;
   @IsOptional() @IsString() period?: RosterReportPeriod | string;
@@ -104,10 +107,14 @@ type RosterReportScope = 'location' | 'all';
 type RosterReportParams = {
   projectId?: string;
   locationId?: string;
+  locationIds?: string[] | string;
   startDate: string;
   endDate: string;
   period?: RosterReportPeriod | string;
   scope?: RosterReportScope | string;
+  // Location ids the requesting user is allowed to see; `null` = unrestricted (admin),
+  // `undefined` = no restriction applied (internal/trusted call). See auth/location-access.ts.
+  allowedLocationIds?: string[] | null;
 };
 
 type Severity = 'CRITICAL' | 'WARNING' | 'INFO';
@@ -381,7 +388,7 @@ export class RostersService {
     });
   }
 
-  async weeklyDetails(id: string, transient?: any) {
+  async weeklyDetails(id: string, transient?: any, allowedLocationIds?: string[] | null) {
     const rosterWeek = await this.prisma.rosterWeek.findUnique({
       where: { id },
       include: {
@@ -406,6 +413,9 @@ export class RostersService {
       },
     });
     if (!rosterWeek) throw new BadRequestException('Roster week not found');
+    if (allowedLocationIds !== undefined && allowedLocationIds !== null && !allowedLocationIds.includes(rosterWeek.locationId)) {
+      throw new ForbiddenException('You do not have access to this roster week');
+    }
 
     let dailyEntries = transient?.dailyEntries ?? rosterWeek.rosterEntries;
     if (!transient?.dailyEntries && dailyEntries.length === 0 && rosterWeek.weeklyAssignments.length > 0) {
@@ -422,7 +432,10 @@ export class RostersService {
     };
   }
 
-  async findWeekly(locationId: string, weekStart: string) {
+  async findWeekly(locationId: string, weekStart: string, allowedLocationIds?: string[] | null) {
+    if (allowedLocationIds !== undefined && allowedLocationIds !== null && !allowedLocationIds.includes(locationId)) {
+      throw new ForbiddenException('You do not have access to this location');
+    }
     const start = startOfDay(parseISO(weekStart));
     const found = await this.prisma.rosterWeek.findUnique({
       where: { locationId_weekStart: { locationId, weekStart: start } },
@@ -578,7 +591,13 @@ export class RostersService {
     }, actor);
   }
 
-  async replacementSuggestions(id: string, filters: { date?: string; shiftId?: string; designationId?: string; originalEmployeeId?: string }) {
+  async replacementSuggestions(id: string, filters: { date?: string; shiftId?: string; designationId?: string; originalEmployeeId?: string }, allowedLocationIds?: string[] | null) {
+    if (allowedLocationIds !== undefined && allowedLocationIds !== null) {
+      const rosterWeek = await this.prisma.rosterWeek.findUnique({ where: { id }, select: { locationId: true } });
+      if (!rosterWeek || !allowedLocationIds.includes(rosterWeek.locationId)) {
+        throw new ForbiddenException('You do not have access to this roster week');
+      }
+    }
     const where: any = { rosterWeekId: id };
     if (filters.date) where.date = startOfDay(parseISO(filters.date));
     if (filters.shiftId) where.shiftId = filters.shiftId;
@@ -595,8 +614,8 @@ export class RostersService {
     });
   }
 
-  async exportWeekly(id: string) {
-    const details = await this.weeklyDetails(id);
+  async exportWeekly(id: string, allowedLocationIds?: string[] | null) {
+    const details = await this.weeklyDetails(id, undefined, allowedLocationIds);
     return this.rosterWorkbookBuffer([details], {
       projectId: details.projectId ?? details.location?.projectId,
       locationId: details.locationId,
@@ -780,11 +799,18 @@ export class RostersService {
     };
   }
 
-  list(filters: { from?: string; to?: string; locationId?: string; employeeId?: string }) {
+  list(filters: { from?: string; to?: string; locationId?: string; employeeId?: string; allowedLocationIds?: string[] | null }) {
     const where: any = {};
     if (filters.from) where.date = { ...(where.date ?? {}), gte: parseISO(filters.from) };
     if (filters.to) where.date = { ...(where.date ?? {}), lte: parseISO(filters.to) };
-    if (filters.locationId) where.shift = { locationId: filters.locationId };
+    if (filters.allowedLocationIds !== undefined && filters.allowedLocationIds !== null) {
+      if (filters.locationId && !filters.allowedLocationIds.includes(filters.locationId)) {
+        throw new ForbiddenException('You do not have access to the requested location');
+      }
+      where.shift = { locationId: filters.locationId ?? { in: filters.allowedLocationIds } };
+    } else if (filters.locationId) {
+      where.shift = { locationId: filters.locationId };
+    }
     if (filters.employeeId) where.employeeId = filters.employeeId;
     return this.prisma.rosterEntry.findMany({
       where,
@@ -865,7 +891,10 @@ export class RostersService {
     return this.prisma.rosterEntry.delete({ where: { id } });
   }
 
-  async coverage(locationId: string, date: string) {
+  async coverage(locationId: string, date: string, allowedLocationIds?: string[] | null) {
+    if (allowedLocationIds !== undefined && allowedLocationIds !== null && !allowedLocationIds.includes(locationId)) {
+      throw new ForbiddenException('You do not have access to this location');
+    }
     const day = startOfDay(parseISO(date));
     const location = await this.prisma.location.findUnique({ where: { id: locationId }, select: { projectId: true } });
     if (!location) throw new BadRequestException('Location not found');
@@ -1969,16 +1998,41 @@ export class RostersService {
     const period = ['week', 'month', 'three-month'].includes(String(params.period ?? '').toLowerCase())
       ? String(params.period).toLowerCase() as RosterReportPeriod
       : 'week';
-    const scope: RosterReportScope = String(params.scope ?? '').toLowerCase() === 'all' ? 'all' : 'location';
-    const selectedLocation = params.locationId
-      ? await this.prisma.location.findUnique({ where: { id: params.locationId }, include: { project: true } })
-      : null;
-    const projectId = params.projectId ?? selectedLocation?.projectId;
-    if (scope === 'location' && !params.locationId) throw new BadRequestException('locationId is required for selected-location roster reports');
+    let scope: RosterReportScope = String(params.scope ?? '').toLowerCase() === 'all' ? 'all' : 'location';
+    let locationIds = Array.isArray(params.locationIds)
+      ? params.locationIds.filter(Boolean)
+      : typeof params.locationIds === 'string' && params.locationIds.trim()
+        ? params.locationIds.split(',').map((id) => id.trim()).filter(Boolean)
+        : params.locationId ? [params.locationId] : [];
+
+    const allowed = params.allowedLocationIds;
+    if (allowed !== undefined) {
+      if (allowed === null) {
+        // unrestricted (admin) - leave scope/locationIds as requested
+      } else if (allowed.length === 0) {
+        throw new ForbiddenException('You are not assigned to a location, so no roster data is visible to you');
+      } else if (scope === 'all') {
+        // Restricted users can never see "all locations" - fall back to their own.
+        scope = 'location';
+        locationIds = allowed;
+      } else if (locationIds.length) {
+        const permitted = locationIds.filter((id) => allowed.includes(id));
+        if (permitted.length === 0) throw new ForbiddenException('You do not have access to the requested location(s)');
+        locationIds = permitted;
+      } else {
+        locationIds = allowed;
+      }
+    }
+
+    const selectedLocations = locationIds.length
+      ? await this.prisma.location.findMany({ where: { id: { in: locationIds } }, include: { project: true }, orderBy: { name: 'asc' } })
+      : [];
+    const projectId = params.projectId ?? selectedLocations[0]?.projectId;
+    if (scope === 'location' && !locationIds.length) throw new BadRequestException('locationId is required for selected-location roster reports');
     if (!projectId) throw new BadRequestException('projectId is required for all-location roster reports');
-    const project = projectId ? await this.prisma.project.findUnique({ where: { id: projectId } }) : selectedLocation?.project ?? null;
+    const project = projectId ? await this.prisma.project.findUnique({ where: { id: projectId } }) : selectedLocations[0]?.project ?? null;
     const locations = scope === 'location'
-      ? selectedLocation ? [selectedLocation] : []
+      ? selectedLocations
       : await this.prisma.location.findMany({ where: { projectId }, orderBy: { name: 'asc' } });
 
     return {
@@ -1988,7 +2042,7 @@ export class RostersService {
       end,
       projectId,
       project,
-      location: scope === 'location' ? selectedLocation : null,
+      location: scope === 'location' && selectedLocations.length === 1 ? selectedLocations[0] : null,
       locations,
     };
   }
@@ -2012,7 +2066,7 @@ export class RostersService {
       { weekEnd: { gte: context.start } },
       { OR: [{ projectId: context.projectId }, { location: { projectId: context.projectId } }] },
     ];
-    if (context.scope === 'location') and.push({ locationId: params.locationId });
+    if (context.scope === 'location') and.push({ locationId: { in: context.locations.map((location) => location.id) } });
 
     const weeks = await this.prisma.rosterWeek.findMany({
       where: { AND: and },
@@ -2200,9 +2254,10 @@ export class RostersService {
     const periodLabel = String(params.period ?? 'week').toUpperCase();
     const scopeLabel = String(params.scope ?? 'location').toLowerCase() === 'all' ? 'All locations' : 'Selected location';
     const projectName = details[0]?.location?.project?.name ?? params.projectId ?? 'Project';
+    const distinctLocationNames = Array.from(new Set(details.map((detailsItem: any) => detailsItem.location?.name).filter(Boolean)));
     const locationName = String(params.scope ?? '').toLowerCase() === 'all'
       ? 'All locations'
-      : details[0]?.location?.name ?? params.locationId ?? 'Selected location';
+      : distinctLocationNames.join(', ') || params.locationId || 'Selected location';
     const requiredDailyHeadcount = this.requiredDailyHeadcountSummary(details);
 
     const workbook = new ExcelJS.Workbook();
@@ -2661,8 +2716,9 @@ export class RostersController {
     @Query('to') to?: string,
     @Query('locationId') locationId?: string,
     @Query('employeeId') employeeId?: string,
+    @CurrentUser() user?: any,
   ) {
-    return this.svc.list({ from, to, locationId, employeeId });
+    return this.svc.list({ from, to, locationId, employeeId, allowedLocationIds: getAllowedLocationIds(user) });
   }
 
   @Get('my')
@@ -2672,26 +2728,28 @@ export class RostersController {
   }
 
   @Get('coverage')
-  coverage(@Query('locationId') locationId: string, @Query('date') date: string) {
-    return this.svc.coverage(locationId, date);
+  coverage(@Query('locationId') locationId: string, @Query('date') date: string, @CurrentUser() user?: any) {
+    return this.svc.coverage(locationId, date, getAllowedLocationIds(user));
   }
 
   @Get('weekly')
-  weekly(@Query('locationId') locationId: string, @Query('weekStart') weekStart: string) {
+  weekly(@Query('locationId') locationId: string, @Query('weekStart') weekStart: string, @CurrentUser() user?: any) {
     if (!locationId || !weekStart) return null;
-    return this.svc.findWeekly(locationId, weekStart);
+    return this.svc.findWeekly(locationId, weekStart, getAllowedLocationIds(user));
   }
 
   @Get('period')
   periodReport(
     @Query('projectId') projectId: string,
     @Query('locationId') locationId: string,
+    @Query('locationIds') locationIds: string,
     @Query('startDate') startDate: string,
     @Query('endDate') endDate: string,
     @Query('period') period?: string,
     @Query('scope') scope?: string,
+    @CurrentUser() user?: any,
   ) {
-    return this.svc.periodReport({ projectId, locationId, startDate, endDate, period, scope });
+    return this.svc.periodReport({ projectId, locationId, locationIds, startDate, endDate, period, scope, allowedLocationIds: getAllowedLocationIds(user) });
   }
 
   @Roles(UserRole.ADMIN, UserRole.ROSTER_MANAGER, UserRole.PROJECT_MANAGER)
@@ -2704,13 +2762,15 @@ export class RostersController {
   async exportRosterReport(
     @Query('projectId') projectId: string,
     @Query('locationId') locationId: string,
+    @Query('locationIds') locationIds: string,
     @Query('startDate') startDate: string,
     @Query('endDate') endDate: string,
     @Query('period') period: string,
     @Query('scope') scope: string,
     @Res() res: Response,
+    @CurrentUser() user?: any,
   ) {
-    const buffer = await this.svc.exportRosterReport({ projectId, locationId, startDate, endDate, period, scope });
+    const buffer = await this.svc.exportRosterReport({ projectId, locationId, locationIds, startDate, endDate, period, scope, allowedLocationIds: getAllowedLocationIds(user) });
     const scopeLabel = scope === 'all' ? 'all-locations' : 'selected-location';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="roster-${period || 'period'}-${scopeLabel}-${startDate}-to-${endDate}.xlsx"`);
@@ -2718,8 +2778,8 @@ export class RostersController {
   }
 
   @Get('weekly/:id')
-  weeklyDetails(@Param('id') id: string) {
-    return this.svc.weeklyDetails(id);
+  weeklyDetails(@Param('id') id: string, @CurrentUser() user?: any) {
+    return this.svc.weeklyDetails(id, undefined, getAllowedLocationIds(user));
   }
 
   @Roles(UserRole.ADMIN, UserRole.ROSTER_MANAGER, UserRole.PROJECT_MANAGER)
@@ -2747,13 +2807,14 @@ export class RostersController {
     @Query('shiftId') shiftId?: string,
     @Query('designationId') designationId?: string,
     @Query('originalEmployeeId') originalEmployeeId?: string,
+    @CurrentUser() user?: any,
   ) {
-    return this.svc.replacementSuggestions(id, { date, shiftId, designationId, originalEmployeeId });
+    return this.svc.replacementSuggestions(id, { date, shiftId, designationId, originalEmployeeId }, getAllowedLocationIds(user));
   }
 
   @Get('weekly/:id/export.xlsx')
-  async exportWeekly(@Param('id') id: string, @Res() res: Response) {
-    const buffer = await this.svc.exportWeekly(id);
+  async exportWeekly(@Param('id') id: string, @Res() res: Response, @CurrentUser() user?: any) {
+    const buffer = await this.svc.exportWeekly(id, getAllowedLocationIds(user));
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="weekly-roster-${id}.xlsx"`);
     res.send(buffer);

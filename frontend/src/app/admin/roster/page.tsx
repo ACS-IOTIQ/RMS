@@ -2,19 +2,25 @@
 import { useEffect, useMemo, useState } from 'react';
 import { addDays, addMonths, endOfMonth, format, parseISO, startOfMonth, startOfWeek } from 'date-fns';
 import {
-  AlertTriangle, CalendarDays, CheckCircle2, Download, Eye, Layers3, Loader2,
+  AlertTriangle, CalendarDays, CheckCircle2, ChevronDown, Download, Eye, Layers3, Loader2,
   MapPin, RotateCcw, ShieldAlert, Sparkles, Users,
 } from 'lucide-react';
 import { Topbar } from '@/components/topbar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { DatePicker } from '@/components/ui/date-picker';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
+import {
+  DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuLabel,
+  DropdownMenuSeparator, DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { api, apiBlob } from '@/lib/api';
+import { useAuth } from '@/lib/auth-context';
 import { useToast } from '@/components/ui/toast';
 import { sortRows } from '@/lib/table-tools';
 
@@ -72,7 +78,7 @@ export default function RosterPage() {
   const [projects, setProjects] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
   const [projectId, setProjectId] = useState('');
-  const [locationId, setLocationId] = useState('');
+  const [locationIds, setLocationIds] = useState<string[]>([]);
   const [weekStart, setWeekStart] = useState(format(startOfWeek(new Date(), { weekStartsOn: 1 }), 'yyyy-MM-dd'));
   const [periodMode, setPeriodMode] = useState<'week' | 'month' | 'three-month'>('week');
   const [exportScope, setExportScope] = useState<'location' | 'all'>('location');
@@ -86,9 +92,21 @@ export default function RosterPage() {
   const [overrideOpen, setOverrideOpen] = useState(false);
   const [overrideReason, setOverrideReason] = useState('');
   const { toast } = useToast();
+  const { user } = useAuth();
+  // Only Admins can see/download roster data across every location; every other
+  // role is restricted server-side to their own assigned location (see the
+  // backend's getAllowedLocationIds), so "All locations" isn't a real choice for them.
+  const isAdminUser = user?.role === 'ADMIN';
 
   const selectedProject = projects.find((project) => project.id === projectId);
-  const selectedLocation = locations.find((location) => location.id === locationId);
+  const selectedLocations = locations.filter((location) => locationIds.includes(location.id));
+  const selectedLocation = selectedLocations[0];
+  const primaryLocationId = locationIds[0] ?? '';
+  const locationsLabel = selectedLocations.length === 0
+    ? 'Select location'
+    : selectedLocations.length === 1
+      ? selectedLocations[0].name
+      : `${selectedLocations[0].name} +${selectedLocations.length - 1}`;
   const weekEnd = useMemo(() => format(addDays(parseISO(weekStart), 6), 'yyyy-MM-dd'), [weekStart]);
   const periodStart = useMemo(() => {
     const anchor = parseISO(weekStart);
@@ -136,17 +154,32 @@ export default function RosterPage() {
     api.get(`/locations?projectId=${projectId}`).then((locationData) => {
       const nextLocations = Array.isArray(locationData) ? locationData : locationData.data ?? [];
       setLocations(nextLocations);
-      setLocationId((current) => nextLocations.some((location: any) => location.id === current) ? current : nextLocations[0]?.id ?? '');
+      setLocationIds((current) => {
+        const kept = current.filter((id) => nextLocations.some((location: any) => location.id === id));
+        if (kept.length) return kept;
+        return nextLocations[0] ? [nextLocations[0].id] : [];
+      });
     });
   }, [projectId]);
 
   useEffect(() => {
-    if (!projectId || !locationId) return;
-    const policyRequest = api.get(`/roster-policies?projectId=${projectId}&locationId=${locationId}`);
+    if (!isAdminUser && exportScope === 'all') setExportScope('location');
+  }, [isAdminUser, exportScope]);
+
+  const toggleLocationId = (id: string) => {
+    setLocationIds((prev) => prev.includes(id) ? prev.filter((locId) => locId !== id) : [...prev, id]);
+  };
+  const toggleAllLocationIds = () => {
+    setLocationIds((prev) => prev.length === locations.length ? [] : locations.map((location) => location.id));
+  };
+
+  useEffect(() => {
+    if (!projectId || !primaryLocationId) return;
+    const policyRequest = api.get(`/roster-policies?projectId=${projectId}&locationId=${primaryLocationId}`);
     if (periodMode === 'week') {
       Promise.all([
         policyRequest,
-        api.get(`/roster/weekly?locationId=${locationId}&weekStart=${weekStart}`),
+        api.get(`/roster/weekly?locationId=${primaryLocationId}&weekStart=${weekStart}`),
       ]).then(([policyData, roster]) => {
         setPolicy(policyData?.[0] ?? null);
         setRosterWeek(roster);
@@ -158,6 +191,7 @@ export default function RosterPage() {
       return;
     }
 
+    if (exportScope === 'location' && !locationIds.length) return;
     const params = new URLSearchParams({
       projectId,
       startDate: periodStart,
@@ -165,7 +199,7 @@ export default function RosterPage() {
       period: periodMode,
       scope: exportScope,
     });
-    if (exportScope === 'location') params.set('locationId', locationId);
+    if (exportScope === 'location') params.set('locationIds', locationIds.join(','));
     Promise.all([
       policyRequest,
       api.get(`/roster/period?${params.toString()}`),
@@ -177,7 +211,7 @@ export default function RosterPage() {
       setRosterWeek(null);
       setPeriodReport(null);
     });
-  }, [projectId, locationId, weekStart, periodMode, periodStart, periodEnd, exportScope]);
+  }, [projectId, locationIds, primaryLocationId, weekStart, periodMode, periodStart, periodEnd, exportScope]);
 
   const filteredEntries = entries;
   const filteredAssignments = useMemo(() => sortRows(assignments, 'employee.name', 'asc'), [assignments]);
@@ -189,7 +223,9 @@ export default function RosterPage() {
   }, [filteredEntries]);
 
   const previewRoster = async () => {
-    if (!projectId || !locationId) return toast('Select project and location', 'error');
+    if (!projectId || (periodMode === 'week' ? !primaryLocationId : exportScope === 'location' && !locationIds.length)) {
+      return toast('Select project and at least one location', 'error');
+    }
     setLoading(true);
     try {
       if (periodMode !== 'week') {
@@ -200,14 +236,14 @@ export default function RosterPage() {
           period: periodMode,
           scope: exportScope,
         };
-        if (exportScope === 'location') body.locationId = locationId;
+        if (exportScope === 'location') body.locationIds = locationIds;
         const result = await api.post('/roster/period/preview', body);
         setRosterWeek(null);
         setPeriodReport(result.report);
-        toast(`Period ready: ${result.refreshedCount ?? 0} week(s) refreshed`, 'success');
+        toast(`Period ready: ${result.refreshedCount ?? 0} week(s) refreshed across ${locationIds.length || 'all'} location(s)`, 'success');
         return;
       }
-      const data = await api.post('/roster/weekly/preview', { projectId, locationId, weekStartDate: weekStart, mode: 'overwrite' });
+      const data = await api.post('/roster/weekly/preview', { projectId, locationId: primaryLocationId, weekStartDate: weekStart, mode: 'overwrite' });
       setRosterWeek(data);
       const critical = data.validationSummary?.criticalCount ?? 0;
       toast(`Preview ready: ${critical} critical, ${data.validationSummary?.warningCount ?? 0} warning(s)`, critical ? 'error' : 'success');
@@ -247,7 +283,7 @@ export default function RosterPage() {
           period: periodMode,
           scope: exportScope,
         });
-        if (exportScope === 'location') params.set('locationId', locationId);
+        if (exportScope === 'location') params.set('locationIds', locationIds.join(','));
         setPeriodReport(await api.get(`/roster/period?${params.toString()}`));
       }
       toast('Roster regenerated', 'success');
@@ -260,7 +296,7 @@ export default function RosterPage() {
 
   const exportRoster = async () => {
     if (!projectId) return toast('Select project before export', 'error');
-    if (exportScope === 'location' && !locationId) return toast('Select location before export', 'error');
+    if (exportScope === 'location' && !locationIds.length) return toast('Select at least one location before export', 'error');
     const params = new URLSearchParams({
       projectId,
       startDate: periodStart,
@@ -268,9 +304,9 @@ export default function RosterPage() {
       period: periodMode,
       scope: exportScope,
     });
-    if (exportScope === 'location') params.set('locationId', locationId);
+    if (exportScope === 'location') params.set('locationIds', locationIds.join(','));
     const blob = await apiBlob(`/roster/export.xlsx?${params.toString()}`);
-    const scopeLabel = exportScope === 'all' ? 'all-locations' : selectedLocation?.name ?? 'location';
+    const scopeLabel = exportScope === 'all' ? 'all-locations' : selectedLocations.map((location) => location.name).join('-') || 'location';
     saveBlob(blob, `roster-${periodMode}-${scopeLabel}-${periodStart}-to-${periodEnd}.xlsx`);
   };
 
@@ -309,7 +345,7 @@ export default function RosterPage() {
 
   return (
     <>
-      <Topbar title="Roster" subtitle={`${selectedLocation?.name ?? 'Select location'} / ${periodStart} to ${periodEnd}`} />
+      <Topbar title="Roster" subtitle={`${locationsLabel} / ${periodStart} to ${periodEnd}`} />
       <main className="space-y-4 p-3 md:p-5">
         <Card className="rounded-lg">
           <CardContent className="p-4 md:p-5">
@@ -332,14 +368,45 @@ export default function RosterPage() {
                     </Select>
                   </div>
                   <div className="space-y-1.5">
-                    <Label>Location</Label>
-                    <Select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
-                      {locations.map((location) => <option key={location.id} value={location.id}>{location.name} ({location._count?.employees ?? 0})</option>)}
-                    </Select>
+                    <Label>Location{locationIds.length > 1 ? `s (${locationIds.length})` : ''}</Label>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="outline"
+                          className="h-9 w-full justify-between px-3 font-normal disabled:opacity-60"
+                          disabled={exportScope === 'all'}
+                          title={exportScope === 'all' ? 'Scope is set to All locations' : undefined}
+                        >
+                          <span className="truncate">{exportScope === 'all' ? 'All locations' : locationsLabel}</span>
+                          <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-60" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="max-h-72 w-64 overflow-y-auto">
+                        <DropdownMenuLabel>Select locations</DropdownMenuLabel>
+                        <DropdownMenuCheckboxItem
+                          checked={locations.length > 0 && locationIds.length === locations.length}
+                          onSelect={(e) => e.preventDefault()}
+                          onCheckedChange={toggleAllLocationIds}
+                        >
+                          Select all
+                        </DropdownMenuCheckboxItem>
+                        <DropdownMenuSeparator />
+                        {locations.map((location) => (
+                          <DropdownMenuCheckboxItem
+                            key={location.id}
+                            checked={locationIds.includes(location.id)}
+                            onSelect={(e) => e.preventDefault()}
+                            onCheckedChange={() => toggleLocationId(location.id)}
+                          >
+                            {location.name} ({location._count?.employees ?? 0})
+                          </DropdownMenuCheckboxItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                   <div className="space-y-1.5">
                     <Label>{periodMode === 'week' ? 'Week start' : 'Period anchor'}</Label>
-                    <Input type="date" value={weekStart} onChange={(e) => setWeekStart(e.target.value)} />
+                    <DatePicker value={weekStart} onChange={setWeekStart} />
                   </div>
                   <div className="space-y-1.5">
                     <Label>Period</Label>
@@ -349,9 +416,14 @@ export default function RosterPage() {
                   </div>
                   <div className="space-y-1.5">
                     <Label>Scope</Label>
-                    <Select value={exportScope} onChange={(e) => setExportScope(e.target.value as any)}>
-                      <option value="location">Selected location</option>
-                      <option value="all">All locations</option>
+                    <Select
+                      value={exportScope}
+                      onChange={(e) => setExportScope(e.target.value as any)}
+                      disabled={!isAdminUser}
+                      title={!isAdminUser ? 'Only Admins can view or download all locations' : undefined}
+                    >
+                      <option value="location">Selected location(s)</option>
+                      {isAdminUser && <option value="all">All locations</option>}
                     </Select>
                   </div>
                   <div className="space-y-1.5">
@@ -409,7 +481,9 @@ export default function RosterPage() {
 
         <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-background px-3 py-2 text-sm text-muted-foreground">
           <MapPin className="h-4 w-4" />
-          <span className="font-medium text-foreground">{selectedLocation?.name ?? 'No location selected'}</span>
+          <span className="font-medium text-foreground">
+            {exportScope === 'all' ? 'All locations' : selectedLocations.length ? selectedLocations.map((location) => location.name).join(', ') : 'No location selected'}
+          </span>
           <span>{selectedProject?.name ?? ''}</span>
           <span className="ml-auto">Policy: {policy?.requiredDailyHeadcount ?? '--'} daily / {policy?.workingDaysPerEmployee ?? '--'} working days</span>
         </div>

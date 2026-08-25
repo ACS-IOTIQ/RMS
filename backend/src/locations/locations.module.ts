@@ -4,6 +4,7 @@ import { Type } from 'class-transformer';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser, Roles, RolesGuard } from '../auth/roles.guard';
+import { getAllowedLocationIds } from '../auth/location-access';
 import { EmployeeStatus, UserRole, WeeklyOffPolicy } from '@prisma/client';
 
 class LocationDto {
@@ -30,8 +31,12 @@ class AssignmentDto {
 export class LocationsService {
   constructor(private prisma: PrismaService) {}
 
-  async list(projectId?: string, page?: number, pageSize?: number) {
-    const where = projectId ? { projectId } : {};
+  async list(projectId?: string, page?: number, pageSize?: number, allowedLocationIds?: string[] | null) {
+    const where: any = projectId ? { projectId } : {};
+    if (allowedLocationIds !== null && allowedLocationIds !== undefined) {
+      if (allowedLocationIds.length === 0) return page || pageSize ? { data: [], meta: { page: 1, pageSize: pageSize || 10, total: 0, totalPages: 1 } } : [];
+      where.id = { in: allowedLocationIds };
+    }
     const include = {
       project: true,
       _count: { select: { employees: true, shifts: true, departments: true } },
@@ -228,8 +233,13 @@ export class LocationsController {
   constructor(private svc: LocationsService) {}
 
   @Get()
-  list(@Query('projectId') projectId?: string, @Query('page') page?: string, @Query('pageSize') pageSize?: string) {
-    return this.svc.list(projectId, page ? Number(page) : undefined, pageSize ? Number(pageSize) : undefined);
+  list(
+    @Query('projectId') projectId?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @CurrentUser() user?: any,
+  ) {
+    return this.svc.list(projectId, page ? Number(page) : undefined, pageSize ? Number(pageSize) : undefined, getAllowedLocationIds(user));
   }
 
   @Get(':id/assignment-candidates')

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(curl -s -X POST http://localhost:3001/auth/register -H \"Content-Type: application/json\" -d '{\"email\":\"newadmin@roster.com\",\"password\":\"NewAdmin@2026!\"}')",
+      "Bash(curl -s -X POST http://localhost:3001/api/auth/register -H \"Content-Type: application/json\" -d '{\"email\":\"newadmin@roster.com\",\"password\":\"NewAdmin@2026!\"}')",
+      "Bash(curl -s -X POST http://localhost:3001/api/auth/login -H \"Content-Type: application/json\" -d '{\"email\":\"newadmin@roster.com\",\"password\":\"NewAdmin@2026!\"}')",
+      "Bash(tasklist)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3005/admin/roster)",
+      "Bash(grep -rniE \"password.*=.*['\\\\\"].{4,20}['\\\\\"]\" backend/prisma/seed.ts)"
+    ]
+  }
+}
