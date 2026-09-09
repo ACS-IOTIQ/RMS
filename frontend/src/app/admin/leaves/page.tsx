@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { Check, FileText, Search, X } from 'lucide-react';
+import { Check, Eye, FileText, Search, X } from 'lucide-react';
 import { Topbar } from '@/components/topbar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -8,12 +8,15 @@ import { Select } from '@/components/ui/select';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { api } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
 import { formatDate } from '@/lib/utils';
 import { SortDir, filterByQuery, sortRows } from '@/lib/table-tools';
+import { differenceInCalendarDays, parseISO } from 'date-fns';
 
 const statusVariant: Record<string, any> = { PENDING: 'warning', APPROVED: 'success', REJECTED: 'destructive', CANCELLED: 'outline' };
+const leaveDays = (l: any) => differenceInCalendarDays(parseISO(l.endDate), parseISO(l.startDate)) + 1;
 
 export default function LeavesPage() {
   const [items, setItems] = useState<any[]>([]);
@@ -22,6 +25,7 @@ export default function LeavesPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [sortKey, setSortKey] = useState('createdAt');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
+  const [viewing, setViewing] = useState<any>(null);
   const { toast } = useToast();
 
   const load = async () => {
@@ -44,6 +48,7 @@ export default function LeavesPage() {
     try {
       await api.put(`/leaves/${id}/decision`, { status });
       toast(`Leave ${status.toLowerCase()}`, 'success');
+      setViewing((v: any) => (v?.id === id ? null : v));
       load();
     } catch (e: any) { toast(e.message, 'error'); }
   };
@@ -91,7 +96,21 @@ export default function LeavesPage() {
                   <TableCell><Badge variant="outline">{l.type}</Badge></TableCell>
                   <TableCell>{formatDate(l.startDate)}</TableCell>
                   <TableCell>{formatDate(l.endDate)}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground max-w-xs truncate">{l.reason || '—'}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground max-w-xs">
+                    <div className="flex items-center gap-1.5">
+                      <span className="truncate">{l.reason || '—'}</span>
+                      {l.reason && (
+                        <button
+                          type="button"
+                          onClick={() => setViewing(l)}
+                          className="shrink-0 text-muted-foreground hover:text-foreground"
+                          title="View full reason"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </TableCell>
                   <TableCell><Badge variant={statusVariant[l.status]}>{l.status}</Badge></TableCell>
                   <TableCell className="text-right">
                     {l.status === 'PENDING' && (
@@ -107,6 +126,46 @@ export default function LeavesPage() {
           </Table>
         </CardContent></Card>
       </main>
+
+      <Dialog open={!!viewing} onOpenChange={(o) => !o && setViewing(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{viewing?.employee?.name}</DialogTitle>
+            <DialogDescription>
+              {viewing?.employee?.designation?.name} · {viewing?.employee?.location?.name}
+            </DialogDescription>
+          </DialogHeader>
+          {viewing && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div><p className="text-xs text-muted-foreground">Type</p><Badge variant="outline">{viewing.type}</Badge></div>
+                <div><p className="text-xs text-muted-foreground">Status</p><Badge variant={statusVariant[viewing.status]}>{viewing.status}</Badge></div>
+              </div>
+              <div className="text-sm">
+                <p className="text-xs text-muted-foreground">Duration</p>
+                <p className="font-medium">
+                  {formatDate(viewing.startDate)} – {formatDate(viewing.endDate)}{' '}
+                  <span className="text-muted-foreground font-normal">({leaveDays(viewing)} day{leaveDays(viewing) > 1 ? 's' : ''})</span>
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Reason</p>
+                <p className="text-sm whitespace-pre-wrap">{viewing.reason || 'No reason provided.'}</p>
+              </div>
+            </div>
+          )}
+          {viewing?.status === 'PENDING' && (
+            <DialogFooter>
+              <Button variant="ghost" className="text-destructive" onClick={() => decide(viewing.id, 'REJECTED')}>
+                <X className="h-4 w-4 mr-1" />Reject
+              </Button>
+              <Button variant="ghost" className="text-emerald-600 hover:text-emerald-700" onClick={() => decide(viewing.id, 'APPROVED')}>
+                <Check className="h-4 w-4 mr-1" />Approve
+              </Button>
+            </DialogFooter>
+          )}
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

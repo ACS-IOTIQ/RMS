@@ -124,6 +124,24 @@ export class LeavesService {
     return leave;
   }
 
+  async update(id: string, dto: LeaveDto, requesterEmployeeId?: string, requesterRole?: UserRole) {
+    const existing = await this.prisma.leave.findUnique({ where: { id } });
+    if (!existing) throw new BadRequestException('Leave request not found');
+    if (requesterRole === UserRole.EMPLOYEE && existing.employeeId !== requesterEmployeeId) {
+      throw new ForbiddenException('Cannot edit another employee\'s leave');
+    }
+    if (existing.status !== LeaveStatus.PENDING) {
+      throw new ForbiddenException('Only pending leave requests can be edited');
+    }
+    const start = parseISO(dto.startDate);
+    const end = parseISO(dto.endDate);
+    if (end < start) throw new BadRequestException('endDate must be after startDate');
+    return this.prisma.leave.update({
+      where: { id },
+      data: { type: dto.type, startDate: start, endDate: end, reason: dto.reason },
+    });
+  }
+
   remove(id: string, employeeId?: string, role?: UserRole) {
     if (role === UserRole.EMPLOYEE) {
       return this.prisma.leave.deleteMany({ where: { id, employeeId, status: LeaveStatus.PENDING } });
@@ -169,6 +187,11 @@ export class LeavesController {
   @Roles(UserRole.ADMIN, UserRole.EMPLOYEE, UserRole.ROSTER_MANAGER, UserRole.PROJECT_MANAGER) @Put(':id/decision')
   decide(@Param('id') id: string, @Body() dto: DecisionDto, @CurrentUser() user: any) {
     return this.svc.decide(id, dto, user);
+  }
+
+  @Put(':id')
+  update(@Param('id') id: string, @Body() dto: LeaveDto, @CurrentUser() user: any) {
+    return this.svc.update(id, dto, user.employeeId, user.role);
   }
 
   @Delete(':id')
