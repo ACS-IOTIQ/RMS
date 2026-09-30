@@ -4,8 +4,9 @@ import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard, Users, Building2, MapPin, Briefcase, Award, Clock,
   CalendarDays, FileSearch, FileText, LogOut, PanelLeftClose, PanelLeftOpen,
-  ShieldCheck, User, CalendarCheck, Network, SlidersHorizontal,
+  User, CalendarCheck, Network, SlidersHorizontal,
 } from 'lucide-react';
+import { Logo } from '@/components/logo';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
 
@@ -56,9 +57,7 @@ export function Sidebar({
       collapsed ? 'md:w-20' : 'md:w-64',
     )}>
       <div className={cn('flex h-14 items-center border-b px-3', collapsed ? 'justify-center' : 'gap-2')}>
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-          <ShieldCheck className="h-4 w-4" />
-        </div>
+        <Logo size={34} alt={collapsed ? 'RosterOps' : ''} />
         <div className={cn('flex flex-col leading-tight', collapsed && 'hidden')}>
           <span className="text-sm font-semibold">RosterOps</span>
           <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Workforce Suite</span>

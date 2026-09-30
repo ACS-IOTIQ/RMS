@@ -7,11 +7,16 @@ import {
   Briefcase,
   Download,
   Filter,
+  GripVertical,
   Layers3,
   MapPin,
+  Minus,
   PieChart as PieChartIcon,
+  Plus,
   RefreshCw,
+  RotateCcw,
   Search,
+  SlidersHorizontal,
   Table2,
   Users,
 } from 'lucide-react';
@@ -28,10 +33,26 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import {
+  DndContext,
+  DragEndEvent,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  arrayMove,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { Topbar } from '@/components/topbar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { PaginationControls, PaginationMeta } from '@/components/ui/pagination';
@@ -57,6 +78,42 @@ const STATUS_ORDER = ['ACTIVE', 'ON_LEAVE', 'PROBATION', 'TRAINING', 'BENCH', 'S
 const WORKFORCE_ORDER = ['PRIMARY', 'BACKUP', 'CONTRACTOR', 'INTERN', 'TEMPORARY'];
 
 const emptyMeta: PaginationMeta = { page: 1, pageSize: 10, total: 0, totalPages: 1 };
+
+type WidgetCategory = 'Stat' | 'Chart' | 'Table';
+
+const WIDGET_REGISTRY: { id: string; label: string; category: WidgetCategory; span: string }[] = [
+  { id: 'stat-total', label: 'Filtered Employees', category: 'Stat', span: 'md:col-span-4 xl:col-span-2' },
+  { id: 'stat-active', label: 'Active Workforce', category: 'Stat', span: 'md:col-span-4 xl:col-span-2' },
+  { id: 'stat-locations', label: 'Locations', category: 'Stat', span: 'md:col-span-4 xl:col-span-2' },
+  { id: 'stat-groups', label: 'Groups', category: 'Stat', span: 'md:col-span-4 xl:col-span-2' },
+  { id: 'stat-designations', label: 'Designations', category: 'Stat', span: 'md:col-span-4 xl:col-span-2' },
+  { id: 'stat-primary', label: 'Primary Category', category: 'Stat', span: 'md:col-span-4 xl:col-span-2' },
+  { id: 'chart-group-pie', label: 'Group-Wise Distribution', category: 'Chart', span: 'md:col-span-6' },
+  { id: 'chart-group-bar', label: 'Group-Wise Employee Count', category: 'Chart', span: 'md:col-span-6' },
+  { id: 'chart-location-compare', label: 'Multi-Location Comparison', category: 'Chart', span: 'md:col-span-7' },
+  { id: 'chart-designation-drilldown', label: 'Designation Drill-Down', category: 'Chart', span: 'md:col-span-5' },
+  { id: 'table-group-summary', label: 'Group Summary', category: 'Table', span: 'md:col-span-5' },
+  { id: 'table-distribution', label: 'Workforce Distribution Table', category: 'Table', span: 'md:col-span-7' },
+];
+const DEFAULT_WIDGET_ORDER = WIDGET_REGISTRY.map((widget) => widget.id);
+const DASHBOARD_LAYOUT_KEY = 'roster_admin_dashboard_layout_v1';
+
+// Persisted shape is just the visible widgets, in the order the admin wants them shown.
+// Anything not in this list is "hidden"; any registry id the saved list doesn't know about
+// yet (e.g. a widget added in a later release) is appended so it shows up by default.
+function loadVisibleOrder(): string[] {
+  if (typeof window === 'undefined') return DEFAULT_WIDGET_ORDER;
+  try {
+    const raw = window.localStorage.getItem(DASHBOARD_LAYOUT_KEY);
+    if (!raw) return DEFAULT_WIDGET_ORDER;
+    const saved: string[] = JSON.parse(raw);
+    const known = saved.filter((id) => DEFAULT_WIDGET_ORDER.includes(id));
+    const missing = DEFAULT_WIDGET_ORDER.filter((id) => !known.includes(id));
+    return [...known, ...missing];
+  } catch {
+    return DEFAULT_WIDGET_ORDER;
+  }
+}
 
 function rowsFromResponse(response: any) {
   return Array.isArray(response) ? response : response?.data ?? [];
@@ -111,7 +168,40 @@ export default function AdminDashboard() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [loading, setLoading] = useState(true);
+  const [visibleOrder, setVisibleOrder] = useState<string[]>(DEFAULT_WIDGET_ORDER);
+  const [customizeOpen, setCustomizeOpen] = useState(false);
   const { toast } = useToast();
+
+  useEffect(() => {
+    setVisibleOrder(loadVisibleOrder());
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(DASHBOARD_LAYOUT_KEY, JSON.stringify(visibleOrder));
+  }, [visibleOrder]);
+
+  const hiddenWidgets = useMemo(
+    () => WIDGET_REGISTRY.filter((widget) => !visibleOrder.includes(widget.id)),
+    [visibleOrder],
+  );
+
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+
+  const showWidget = (id: string) => setVisibleOrder((prev) => [...prev, id]);
+  const hideWidget = (id: string) => setVisibleOrder((prev) => prev.filter((widgetId) => widgetId !== id));
+  const resetLayout = () => setVisibleOrder(DEFAULT_WIDGET_ORDER);
+
+  const onDragEndVisibleWidgets = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setVisibleOrder((prev) => {
+      const oldIndex = prev.indexOf(String(active.id));
+      const newIndex = prev.indexOf(String(over.id));
+      if (oldIndex === -1 || newIndex === -1) return prev;
+      return arrayMove(prev, oldIndex, newIndex);
+    });
+  };
 
   async function loadDashboard() {
     try {
@@ -402,6 +492,218 @@ export default function AdminDashboard() {
     XLSX.writeFile(workbook, `workforce-group-dashboard-${filenameDate}.xlsx`);
   }
 
+  const WIDGET_CONTENT: Record<string, ReactNode> = {
+    'stat-total': (
+      <StatCard icon={Users} label="Filtered Employees" value={totalEmployees} helper={loading ? 'Loading data' : viewScope === 'all' ? 'all selected locations' : selectedLocation?.name ?? 'selected location'} />
+    ),
+    'stat-active': (
+      <StatCard icon={Briefcase} label="Active Workforce" value={activeEmployees} helper={`${percent(activeEmployees, totalEmployees)}% of filtered set`} />
+    ),
+    'stat-locations': <StatCard icon={MapPin} label="Locations" value={representedLocations} helper="represented in filters" />,
+    'stat-groups': <StatCard icon={Layers3} label="Groups" value={representedGroups} helper="with employees" />,
+    'stat-designations': <StatCard icon={Award} label="Designations" value={representedDesignations} helper="distinct roles" />,
+    'stat-primary': (
+      <StatCard icon={Filter} label="Primary Category" value={primaryCount} helper={`${percent(primaryCount, totalEmployees)}% primary`} />
+    ),
+    'chart-group-pie': (
+      <ChartCard icon={PieChartIcon} title="Group-Wise Distribution" description="Donut view of selected workforce by functional group">
+        {totalEmployees > 0 ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie
+                data={groupSummary.filter((row) => row.count > 0)}
+                dataKey="count"
+                nameKey="group"
+                cx="50%"
+                cy="50%"
+                innerRadius={70}
+                outerRadius={105}
+                paddingAngle={2}
+                onClick={(row: any) => setGroupFilter(row.group)}
+              >
+                {groupSummary.filter((row) => row.count > 0).map((row) => (
+                  <Cell key={row.group} fill={row.fill} />
+                ))}
+              </Pie>
+              <Tooltip formatter={(value: any, name: any) => [`${value} employees`, name]} />
+              <Legend />
+            </PieChart>
+          </ResponsiveContainer>
+        ) : <EmptyChart />}
+      </ChartCard>
+    ),
+    'chart-group-bar': (
+      <ChartCard icon={BarChart3} title="Group-Wise Employee Count" description="Bar chart for exact comparison between SOC, NOC, Infra, Application, and Non-IT">
+        {totalEmployees > 0 ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={groupSummary}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="group" tick={{ fontSize: 11 }} />
+              <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+              <Tooltip cursor={{ fill: 'hsl(var(--muted))' }} />
+              <Bar dataKey="count" radius={[8, 8, 0, 0]} onClick={(row: any) => setGroupFilter(row.group)}>
+                {groupSummary.map((row) => <Cell key={row.group} fill={row.fill} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        ) : <EmptyChart />}
+      </ChartCard>
+    ),
+    'chart-location-compare': (
+      <ChartCard icon={MapPin} title="Multi-Location Comparison" description="Stacked bar chart comparing group count across locations">
+        {locationRows.length > 0 ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={locationRows} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="location" tick={{ fontSize: 11 }} interval={0} angle={-20} textAnchor="end" height={58} />
+              <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+              <Tooltip cursor={{ fill: 'hsl(var(--muted))' }} />
+              <Legend />
+              {GROUPS.map((group) => (
+                <Bar key={group.name} dataKey={group.name} stackId="workforce" fill={group.color} radius={[4, 4, 0, 0]} />
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+        ) : <EmptyChart />}
+      </ChartCard>
+    ),
+    'chart-designation-drilldown': (
+      <ChartCard icon={Award} title={`${focusedGroup} Designation Drill-Down`} description="Click a group in the charts, or choose a group filter, to drill into designation counts">
+        {designationDrilldown.length > 0 ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={designationDrilldown.slice(0, 10)} layout="vertical" margin={{ left: 100, right: 16 }}>
+              <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+              <XAxis type="number" tick={{ fontSize: 11 }} allowDecimals={false} />
+              <YAxis dataKey="designation" type="category" width={140} tick={{ fontSize: 11 }} />
+              <Tooltip cursor={{ fill: 'hsl(var(--muted))' }} />
+              <Bar dataKey="count" fill={GROUP_COLORS[focusedGroup]} radius={[0, 8, 8, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        ) : <EmptyChart />}
+      </ChartCard>
+    ),
+    'table-group-summary': (
+      <Card className="h-full">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Layers3 className="h-4 w-4 text-primary" />
+            Group Summary
+          </CardTitle>
+          <CardDescription>Exact totals and percentage share for the selected filters</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {groupSummary.map((row) => {
+            const group = GROUPS.find((item) => item.name === row.group)!;
+            return (
+              <button
+                type="button"
+                key={row.group}
+                onClick={() => setGroupFilter(row.group)}
+                className={`w-full rounded-lg border p-3 text-left transition hover:bg-muted/40 ${groupFilter === row.group ? 'border-primary bg-primary/5' : ''}`}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="h-3 w-3 rounded-full" style={{ backgroundColor: row.fill }} />
+                    <span className="font-medium">{row.group}</span>
+                  </div>
+                  <Badge variant="outline">{row.count}</Badge>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
+                  <div className="h-full rounded-full" style={{ width: `${row.percentage}%`, backgroundColor: row.fill }} />
+                </div>
+                <div className="mt-1 text-xs text-muted-foreground">{row.percentage}% of filtered workforce</div>
+              </button>
+            );
+          })}
+          {groupFilter && (
+            <Button type="button" variant="outline" className="w-full" onClick={() => { setGroupFilter(''); setDesignationFilter(''); }}>
+              Clear Group Drill-Down
+            </Button>
+          )}
+        </CardContent>
+      </Card>
+    ),
+    'table-distribution': (
+      <Card className="h-full">
+        <CardHeader className="border-b">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Table2 className="h-4 w-4 text-primary" />
+                Workforce Distribution Table
+              </CardTitle>
+              <CardDescription>Sortable, searchable, paginated exact values by group, designation, and location</CardDescription>
+            </div>
+            <Select
+              value={`${sortKey}:${sortDir}`}
+              onChange={(event) => {
+                const [key, dir] = event.target.value.split(':');
+                setSortKey(key);
+                setSortDir(dir as SortDir);
+              }}
+              className="w-56"
+            >
+              <option value="employeeCount:desc">Count high-low</option>
+              <option value="employeeCount:asc">Count low-high</option>
+              <option value="percentage:desc">Percentage high-low</option>
+              <option value="group:asc">Group A-Z</option>
+              <option value="designation:asc">Designation A-Z</option>
+              <option value="location:asc">Location A-Z</option>
+            </Select>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Group</TableHead>
+                <TableHead>Designation</TableHead>
+                <TableHead>Location</TableHead>
+                <TableHead className="text-right">Employee Count</TableHead>
+                <TableHead className="text-right">Percentage</TableHead>
+                <TableHead className="text-right">Group Total</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {pagedRows.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
+                    {loading ? 'Loading dashboard data...' : 'No workforce rows match the selected filters.'}
+                  </TableCell>
+                </TableRow>
+              )}
+              {pagedRows.map((row) => {
+                const group = GROUPS.find((item) => item.name === row.group)!;
+                return (
+                  <TableRow key={row.key}>
+                    <TableCell>
+                      <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${group.soft}`}>
+                        {row.group}
+                      </span>
+                    </TableCell>
+                    <TableCell className="font-medium">{row.designation}</TableCell>
+                    <TableCell>{row.location}</TableCell>
+                    <TableCell className="text-right font-semibold">{row.employeeCount}</TableCell>
+                    <TableCell className="text-right">{row.percentage}%</TableCell>
+                    <TableCell className="text-right text-muted-foreground">{row.groupTotal}</TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+          <PaginationControls
+            meta={tableMeta}
+            onPageChange={setPage}
+            onPageSizeChange={(size) => {
+              setPageSize(size);
+              setPage(1);
+            }}
+          />
+        </CardContent>
+      </Card>
+    ),
+  };
+
   return (
     <>
       <Topbar title="Workforce Dashboard" subtitle="Designation-group visual analytics across projects and locations" />
@@ -419,6 +721,10 @@ export default function AdminDashboard() {
                 </CardDescription>
               </div>
               <div className="flex flex-wrap gap-2">
+                <Button type="button" variant="outline" onClick={() => setCustomizeOpen(true)}>
+                  <SlidersHorizontal className="mr-1.5 h-4 w-4" />
+                  Customize
+                </Button>
                 <Button type="button" variant="outline" onClick={loadDashboard} disabled={loading}>
                   <RefreshCw className="mr-1.5 h-4 w-4" />
                   Refresh
@@ -501,229 +807,104 @@ export default function AdminDashboard() {
           </CardContent>
         </Card>
 
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
-          <StatCard icon={Users} label="Filtered Employees" value={totalEmployees} helper={loading ? 'Loading data' : viewScope === 'all' ? 'all selected locations' : selectedLocation?.name ?? 'selected location'} />
-          <StatCard icon={Briefcase} label="Active Workforce" value={activeEmployees} helper={`${percent(activeEmployees, totalEmployees)}% of filtered set`} />
-          <StatCard icon={MapPin} label="Locations" value={representedLocations} helper="represented in filters" />
-          <StatCard icon={Layers3} label="Groups" value={representedGroups} helper="with employees" />
-          <StatCard icon={Award} label="Designations" value={representedDesignations} helper="distinct roles" />
-          <StatCard icon={Filter} label="Primary Category" value={primaryCount} helper={`${percent(primaryCount, totalEmployees)}% primary`} />
-        </div>
-
-        <div className="grid gap-4 xl:grid-cols-2">
-          <ChartCard
-            icon={PieChartIcon}
-            title="Group-Wise Distribution"
-            description="Donut view of selected workforce by functional group"
-          >
-            {totalEmployees > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={groupSummary.filter((row) => row.count > 0)}
-                    dataKey="count"
-                    nameKey="group"
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={70}
-                    outerRadius={105}
-                    paddingAngle={2}
-                    onClick={(row: any) => setGroupFilter(row.group)}
-                  >
-                    {groupSummary.filter((row) => row.count > 0).map((row) => (
-                      <Cell key={row.group} fill={row.fill} />
-                    ))}
-                  </Pie>
-                  <Tooltip formatter={(value: any, name: any) => [`${value} employees`, name]} />
-                  <Legend />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : <EmptyChart />}
-          </ChartCard>
-
-          <ChartCard
-            icon={BarChart3}
-            title="Group-Wise Employee Count"
-            description="Bar chart for exact comparison between SOC, NOC, Infra, Application, and Non-IT"
-          >
-            {totalEmployees > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={groupSummary}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="group" tick={{ fontSize: 11 }} />
-                  <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-                  <Tooltip cursor={{ fill: 'hsl(var(--muted))' }} />
-                  <Bar dataKey="count" radius={[8, 8, 0, 0]} onClick={(row: any) => setGroupFilter(row.group)}>
-                    {groupSummary.map((row) => <Cell key={row.group} fill={row.fill} />)}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            ) : <EmptyChart />}
-          </ChartCard>
-        </div>
-
-        <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-          <ChartCard
-            icon={MapPin}
-            title="Multi-Location Comparison"
-            description="Stacked bar chart comparing group count across locations"
-          >
-            {locationRows.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={locationRows} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="location" tick={{ fontSize: 11 }} interval={0} angle={-20} textAnchor="end" height={58} />
-                  <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-                  <Tooltip cursor={{ fill: 'hsl(var(--muted))' }} />
-                  <Legend />
-                  {GROUPS.map((group) => (
-                    <Bar key={group.name} dataKey={group.name} stackId="workforce" fill={group.color} radius={[4, 4, 0, 0]} />
-                  ))}
-                </BarChart>
-              </ResponsiveContainer>
-            ) : <EmptyChart />}
-          </ChartCard>
-
-          <ChartCard
-            icon={Award}
-            title={`${focusedGroup} Designation Drill-Down`}
-            description="Click a group in the charts, or choose a group filter, to drill into designation counts"
-          >
-            {designationDrilldown.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={designationDrilldown.slice(0, 10)} layout="vertical" margin={{ left: 100, right: 16 }}>
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                  <XAxis type="number" tick={{ fontSize: 11 }} allowDecimals={false} />
-                  <YAxis dataKey="designation" type="category" width={140} tick={{ fontSize: 11 }} />
-                  <Tooltip cursor={{ fill: 'hsl(var(--muted))' }} />
-                  <Bar dataKey="count" fill={GROUP_COLORS[focusedGroup]} radius={[0, 8, 8, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : <EmptyChart />}
-          </ChartCard>
-        </div>
-
-        <div className="grid gap-4 xl:grid-cols-[0.75fr_1.25fr]">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Layers3 className="h-4 w-4 text-primary" />
-                Group Summary
-              </CardTitle>
-              <CardDescription>Exact totals and percentage share for the selected filters</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {groupSummary.map((row) => {
-                const group = GROUPS.find((item) => item.name === row.group)!;
-                return (
-                  <button
-                    type="button"
-                    key={row.group}
-                    onClick={() => setGroupFilter(row.group)}
-                    className={`w-full rounded-lg border p-3 text-left transition hover:bg-muted/40 ${groupFilter === row.group ? 'border-primary bg-primary/5' : ''}`}
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2">
-                        <span className="h-3 w-3 rounded-full" style={{ backgroundColor: row.fill }} />
-                        <span className="font-medium">{row.group}</span>
-                      </div>
-                      <Badge variant="outline">{row.count}</Badge>
-                    </div>
-                    <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full rounded-full" style={{ width: `${row.percentage}%`, backgroundColor: row.fill }} />
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">{row.percentage}% of filtered workforce</div>
-                  </button>
-                );
-              })}
-              {groupFilter && (
-                <Button type="button" variant="outline" className="w-full" onClick={() => { setGroupFilter(''); setDesignationFilter(''); }}>
-                  Clear Group Drill-Down
-                </Button>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader className="border-b">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                  <CardTitle className="flex items-center gap-2 text-base">
-                    <Table2 className="h-4 w-4 text-primary" />
-                    Workforce Distribution Table
-                  </CardTitle>
-                  <CardDescription>Sortable, searchable, paginated exact values by group, designation, and location</CardDescription>
-                </div>
-                <Select
-                  value={`${sortKey}:${sortDir}`}
-                  onChange={(event) => {
-                    const [key, dir] = event.target.value.split(':');
-                    setSortKey(key);
-                    setSortDir(dir as SortDir);
-                  }}
-                  className="w-56"
-                >
-                  <option value="employeeCount:desc">Count high-low</option>
-                  <option value="employeeCount:asc">Count low-high</option>
-                  <option value="percentage:desc">Percentage high-low</option>
-                  <option value="group:asc">Group A-Z</option>
-                  <option value="designation:asc">Designation A-Z</option>
-                  <option value="location:asc">Location A-Z</option>
-                </Select>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
+          {visibleOrder.map((id) => {
+            const widget = WIDGET_REGISTRY.find((item) => item.id === id);
+            if (!widget) return null;
+            return (
+              <div key={id} className={widget.span}>
+                {WIDGET_CONTENT[id]}
               </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Group</TableHead>
-                    <TableHead>Designation</TableHead>
-                    <TableHead>Location</TableHead>
-                    <TableHead className="text-right">Employee Count</TableHead>
-                    <TableHead className="text-right">Percentage</TableHead>
-                    <TableHead className="text-right">Group Total</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {pagedRows.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
-                        {loading ? 'Loading dashboard data...' : 'No workforce rows match the selected filters.'}
-                      </TableCell>
-                    </TableRow>
-                  )}
-                  {pagedRows.map((row) => {
-                    const group = GROUPS.find((item) => item.name === row.group)!;
-                    return (
-                      <TableRow key={row.key}>
-                        <TableCell>
-                          <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${group.soft}`}>
-                            {row.group}
-                          </span>
-                        </TableCell>
-                        <TableCell className="font-medium">{row.designation}</TableCell>
-                        <TableCell>{row.location}</TableCell>
-                        <TableCell className="text-right font-semibold">{row.employeeCount}</TableCell>
-                        <TableCell className="text-right">{row.percentage}%</TableCell>
-                        <TableCell className="text-right text-muted-foreground">{row.groupTotal}</TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-              <PaginationControls
-                meta={tableMeta}
-                onPageChange={setPage}
-                onPageSizeChange={(size) => {
-                  setPageSize(size);
-                  setPage(1);
-                }}
-              />
-            </CardContent>
-          </Card>
+            );
+          })}
         </div>
       </main>
+
+      <Dialog open={customizeOpen} onOpenChange={setCustomizeOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Customize Dashboard</DialogTitle>
+            <DialogDescription>Drag to reorder, and choose which cards appear — just like rearranging Control Center.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">On Dashboard</p>
+              <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={onDragEndVisibleWidgets}>
+                <SortableContext items={visibleOrder} strategy={verticalListSortingStrategy}>
+                  <div className="space-y-1.5">
+                    {visibleOrder.map((id) => {
+                      const widget = WIDGET_REGISTRY.find((item) => item.id === id);
+                      if (!widget) return null;
+                      return <SortableWidgetRow key={id} id={id} widget={widget} onHide={() => hideWidget(id)} />;
+                    })}
+                    {visibleOrder.length === 0 && (
+                      <p className="rounded-md border border-dashed p-3 text-center text-xs text-muted-foreground">
+                        Nothing shown — add a card from "More cards" below.
+                      </p>
+                    )}
+                  </div>
+                </SortableContext>
+              </DndContext>
+            </div>
+
+            {hiddenWidgets.length > 0 && (
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">More Cards</p>
+                <div className="space-y-1.5">
+                  {hiddenWidgets.map((widget) => (
+                    <div key={widget.id} className="flex items-center gap-2 rounded-md border bg-muted/30 p-2.5">
+                      <Badge variant="outline" className="shrink-0 text-[10px]">{widget.category}</Badge>
+                      <span className="flex-1 text-sm">{widget.label}</span>
+                      <button
+                        type="button"
+                        onClick={() => showWidget(widget.id)}
+                        title={`Add ${widget.label}`}
+                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white hover:bg-emerald-700"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <DialogFooter className="sm:justify-between">
+            <Button type="button" variant="ghost" onClick={resetLayout}>
+              <RotateCcw className="mr-1.5 h-4 w-4" />
+              Reset to Default
+            </Button>
+            <Button type="button" onClick={() => setCustomizeOpen(false)}>Done</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
+  );
+}
+
+function SortableWidgetRow({ id, widget, onHide }: { id: string; widget: { label: string; category: WidgetCategory }; onHide: () => void }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+  return (
+    <div ref={setNodeRef} style={style} className="flex items-center gap-2 rounded-md border bg-card p-2.5">
+      <button type="button" {...attributes} {...listeners} className="shrink-0 cursor-grab touch-none text-muted-foreground hover:text-foreground active:cursor-grabbing">
+        <GripVertical className="h-4 w-4" />
+      </button>
+      <Badge variant="outline" className="shrink-0 text-[10px]">{widget.category}</Badge>
+      <span className="flex-1 text-sm">{widget.label}</span>
+      <button
+        type="button"
+        onClick={onHide}
+        title={`Hide ${widget.label}`}
+        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-destructive text-destructive-foreground hover:opacity-90"
+      >
+        <Minus className="h-3.5 w-3.5" />
+      </button>
+    </div>
   );
 }
 

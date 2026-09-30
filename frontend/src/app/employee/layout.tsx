@@ -24,7 +24,7 @@ export default function EmployeeLayout({ children }: { children: React.ReactNode
   useEffect(() => {
     if (loading) return;
     if (!user) router.replace('/login');
-    else if (user.role !== 'EMPLOYEE') router.replace('/admin');
+    else if (user.role !== 'EMPLOYEE') router.replace('/unauthorized');
   }, [user, loading, router]);
 
   if (loading || !user || user.role !== 'EMPLOYEE') {

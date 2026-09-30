@@ -1,0 +1,295 @@
+/* Landing page styles that Tailwind utilities can't express cleanly: the 3D carousel, looping
+   micro-animations in the "In action" cards and the container-scaled four-steps artwork. */
+
+.gradText {
+  background: linear-gradient(90deg, #5ec8f8, #3b82f6);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.navLink {
+  color: rgba(219, 234, 254, 0.78);
+  transition: color 0.2s ease;
+}
+.navLink:hover {
+  color: #ffffff;
+}
+
+.btnPrimary {
+  background: #2563eb;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+.btnPrimary:hover {
+  background: #1d4ed8;
+  transform: translateY(-1px);
+}
+.btnGlass {
+  transition: background 0.2s ease;
+}
+.btnGlass:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+.btnWhite {
+  transition: background 0.2s ease;
+}
+.btnWhite:hover {
+  background: #eff6ff;
+}
+
+/* ── Module carousel ─────────────────────────────────────────────────────── */
+
+.stage {
+  position: relative;
+  height: 290px;
+  perspective: 1600px;
+  transform-origin: top center;
+}
+.card {
+  position: absolute;
+  left: 50%;
+  top: 10px;
+  width: 236px;
+  height: 252px;
+  margin-left: -118px;
+  padding: 22px;
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.03));
+  backdrop-filter: blur(14px);
+  box-shadow: 0 26px 50px -26px rgba(0, 0, 0, 0.85);
+  color: #ffffff;
+  /* Position is written every frame by the carousel; only the front-card highlight eases in and out.
+     No will-change: it would freeze each card's text at the (small) size it was first drawn at, so
+     text blurs as the card grows towards the front. */
+  transition: box-shadow 0.5s ease, border-color 0.5s ease;
+}
+.cardIcon {
+  width: 50px;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 15px;
+  color: #ffffff;
+}
+.cardGo {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: #bfdbfe;
+  transition: background 0.7s ease, border-color 0.7s ease, color 0.7s ease;
+}
+.front {
+  border-color: rgba(147, 197, 253, 0.6);
+  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.3), 0 36px 72px -24px rgba(37, 99, 235, 0.8);
+}
+.front .cardGo {
+  background: #2563eb;
+  border-color: #3b82f6;
+  color: #ffffff;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: rgba(147, 197, 253, 0.35);
+  cursor: pointer;
+  transition: width 0.3s ease, background 0.3s ease;
+}
+.dotOn {
+  width: 26px;
+  background: #3b82f6;
+}
+
+/* Narrower screens: shrink the whole carousel instead of letting side cards crowd the centre one. */
+@media (max-width: 1100px) {
+  .stage { transform: scale(0.86); height: 250px; }
+}
+@media (max-width: 760px) {
+  .stage { transform: scale(0.72); height: 212px; }
+}
+
+/* ── "In action" cards ───────────────────────────────────────────────────── */
+
+.bento {
+  transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
+}
+.bento:hover {
+  transform: translateY(-6px);
+  border-color: #bfdbfe;
+  box-shadow: 0 28px 56px -28px rgba(37, 99, 235, 0.45);
+}
+.viz {
+  transition: transform 0.4s ease;
+}
+.bento:hover .viz {
+  transform: scale(1.015);
+}
+.dots {
+  background-image: radial-gradient(rgba(147, 197, 253, 0.13) 1px, transparent 1px);
+  background-size: 26px 26px;
+}
+
+.cell {
+  height: 22px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  font-weight: 700;
+  animation: cellIn 6s ease-out infinite;
+}
+.cellM { background: rgba(59, 130, 246, 0.3); color: #bfdbfe; }
+.cellA { background: rgba(245, 158, 11, 0.26); color: #fde68a; }
+.cellN { background: rgba(129, 140, 248, 0.3); color: #c7d2fe; }
+.cellOff { background: rgba(255, 255, 255, 0.07); color: rgba(255, 255, 255, 0.45); font-size: 9px; }
+
+.flowLine {
+  fill: none;
+  stroke: rgba(147, 197, 253, 0.55);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 6;
+  animation: flow 1.2s linear infinite;
+}
+.ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ping 2.6s ease-out infinite;
+}
+.fadeEdges {
+  -webkit-mask-image: linear-gradient(180deg, transparent, #000 18%, #000 82%, transparent);
+  mask-image: linear-gradient(180deg, transparent, #000 18%, #000 82%, transparent);
+}
+.grow { transform-origin: left; animation: growX 6s ease-in-out infinite; }
+.fadeA { animation: fadeA 6s ease-in-out infinite; }
+.fadeB { animation: fadeB 6s ease-in-out infinite; }
+.slideIn { animation: slideIn 6s ease-in-out infinite; }
+.rowIn { animation: rowIn 6s ease-out infinite; }
+.bounce { animation: bounce 1.6s ease-in-out infinite; }
+.ticker { animation: ticker 16s linear infinite; }
+
+@keyframes ping { 0% { transform: scale(1); opacity: 0.75; } 80%, 100% { transform: scale(3.2); opacity: 0; } }
+@keyframes cellIn { 0% { opacity: 0; transform: scale(0.5); } 8% { opacity: 1; transform: scale(1.08); } 12%, 82% { opacity: 1; transform: scale(1); } 92%, 100% { opacity: 0; transform: scale(0.9); } }
+@keyframes flow { from { stroke-dashoffset: 20; } to { stroke-dashoffset: 0; } }
+@keyframes growX { 0%, 5% { transform: scaleX(0); } 35%, 88% { transform: scaleX(1); } 100% { transform: scaleX(0); } }
+@keyframes fadeA { 0%, 42% { opacity: 1; } 50%, 92% { opacity: 0; } 100% { opacity: 1; } }
+@keyframes fadeB { 0%, 42% { opacity: 0; } 50%, 92% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes slideIn { 0%, 50% { opacity: 0; transform: translateY(8px); } 58%, 92% { opacity: 1; transform: translateY(0); } 100% { opacity: 0; transform: translateY(0); } }
+@keyframes rowIn { 0% { opacity: 0; transform: translateX(-12px); } 10%, 84% { opacity: 1; transform: none; } 94%, 100% { opacity: 0; transform: none; } }
+@keyframes bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
+@keyframes ticker { from { transform: translateY(0); } to { transform: translateY(-50%); } }
+
+/* ── Call to action ──────────────────────────────────────────────────────── */
+
+.stars {
+  background-color: #000c24;
+  background-image:
+    radial-gradient(700px 360px at 72% 22%, rgba(37, 99, 235, 0.24), transparent 70%),
+    radial-gradient(rgba(255, 255, 255, 0.35) 1px, transparent 1.4px),
+    radial-gradient(rgba(147, 197, 253, 0.3) 1px, transparent 1.4px),
+    radial-gradient(rgba(255, 255, 255, 0.18) 1px, transparent 1.4px);
+  background-size: auto, 173px 173px, 97px 97px, 61px 61px;
+  background-position: 0 0, 0 0, 41px 67px, 23px 11px;
+}
+/* Planet rim peeking up from the bottom of the card, as in the design, whatever the card height. */
+.horizon {
+  position: absolute;
+  left: 50%;
+  top: calc(100% - 50px);
+  width: 1900px;
+  height: 1900px;
+  margin-left: -950px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, #062058 0%, #031437 60%, #000c24 100%);
+  box-shadow: 0 -1px 0 1px rgba(191, 219, 254, 0.8), 0 -22px 70px 10px rgba(59, 130, 246, 0.5), inset 0 30px 90px rgba(96, 165, 250, 0.35);
+}
+
+/* ── Four steps (reference artwork + live text) ──────────────────────────── */
+
+.steps {
+  background: linear-gradient(90deg, #021f63 0%, #020c2c 25%, #020c2c 75%, #010d30 100%);
+}
+/* Everything inside is laid out in container-query units, so the artwork and its text scale as one. */
+.stepsStage {
+  position: relative;
+  width: min(100%, 1440px);
+  aspect-ratio: 1440 / 810;
+  margin: 0 auto;
+  container-type: inline-size;
+}
+.stageText {
+  position: absolute;
+  left: 0;
+  top: 0;
+  margin: 0;
+}
+.stageLine {
+  position: absolute;
+  display: block;
+  line-height: 1;
+  white-space: nowrap;
+}
+.pill {
+  position: absolute;
+  border-radius: 999px;
+  border: 1px solid rgba(37, 118, 255, 0.55);
+  background: linear-gradient(90deg, rgba(16, 58, 150, 0.55), rgba(3, 20, 62, 0.5));
+  box-shadow: 0 0 14px rgba(37, 118, 255, 0.25);
+}
+.pillDot {
+  position: absolute;
+  top: 50%;
+  width: 0.486cqw;
+  height: 0.486cqw;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: #0a8cf8;
+  box-shadow: 0 0 8px rgba(10, 140, 248, 0.9);
+}
+.stepIcon {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: radial-gradient(circle at 50% 30%, #2166f2 0%, #0e40c4 55%, #0a2f9c 100%);
+  box-shadow: 0 0 0 1px rgba(80, 150, 255, 0.35), 0 0 18px rgba(30, 100, 255, 0.5);
+}
+.stepIcon svg {
+  width: 64%;
+  height: 64%;
+}
+/* Phones and small tablets: the pedestals from the artwork as a strip, with the steps as cards below. */
+.pedestals {
+  aspect-ratio: 1672 / 340;
+  background-image: url('/landing/steps-plate.webp');
+  background-size: 100% auto;
+  background-position: center 49.5%;
+  background-repeat: no-repeat;
+}
+.stepCard {
+  border: 1px solid rgba(96, 150, 255, 0.28);
+  background: linear-gradient(180deg, rgba(40, 80, 180, 0.22), rgba(6, 18, 52, 0.55));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card, .cardGo, .dot, .bento, .viz { transition: none; }
+  .cell, .flowLine, .ring, .grow, .fadeA, .fadeB, .slideIn, .rowIn, .bounce, .ticker { animation: none; }
+  /* Show the finished state of each two-step status chip. */
+  .fadeA { opacity: 0; }
+  .fadeB { opacity: 1; }
+}
