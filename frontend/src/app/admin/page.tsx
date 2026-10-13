@@ -20,7 +20,7 @@ import {
 import { Topbar } from '@/components/topbar';
 import { Select } from '@/components/ui/select';
 import { useToast } from '@/components/ui/toast';
-import { api } from '@/lib/api';
+import { api, getToken } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { BentoCard, CARD_CLASS, DataTable, KpiCard, ToastStack, TooltipProvider, inter, useDashboardToasts } from './_dashboard/bento';
 import {
@@ -122,21 +122,49 @@ function rowsFromResponse(response: any) {
 
 const widgetLabel = (id: string) => WIDGETS.find((widget) => widget.id === id)?.label ?? 'Card';
 
+type DashboardData = { employees: any[]; projects: any[]; locations: any[]; designations: any[] };
+// Last loaded data for this browser tab: returning to the dashboard paints instantly
+// while fresh numbers load quietly in the background.
+let cachedData: DashboardData | null = null;
+
+async function fetchDashboardData(): Promise<DashboardData> {
+  const [employees, projects, locations, designations] = await Promise.all([
+    api.get('/employees/dashboard'),
+    api.get('/projects'),
+    api.get('/locations'),
+    api.get('/designations'),
+  ]);
+  return {
+    employees: rowsFromResponse(employees),
+    projects: rowsFromResponse(projects),
+    locations: rowsFromResponse(locations),
+    designations: rowsFromResponse(designations),
+  };
+}
+
+// Start loading as soon as this route's code arrives, in parallel with the layout's
+// login check, instead of waiting for it. Errors surface when the page consumes it.
+let prefetched: Promise<DashboardData> | null =
+  typeof window !== 'undefined' && getToken() ? fetchDashboardData() : null;
+prefetched?.catch(() => undefined);
+
 export default function AdminDashboard() {
-  const [employees, setEmployees] = useState<any[]>([]);
-  const [projects, setProjects] = useState<any[]>([]);
-  const [locations, setLocations] = useState<any[]>([]);
-  const [designations, setDesignations] = useState<any[]>([]);
+  const [data, setData] = useState<DashboardData>(() => cachedData ?? { employees: [], projects: [], locations: [], designations: [] });
+  const { employees, projects, locations, designations } = data;
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [focus, setFocus] = useState<DesignationGroup | null>(null);
   const [stackMode, setStackMode] = useState<'count' | 'share'>('count');
-  const [loading, setLoading] = useState(true);
-  // Bumped after every successful load so charts replay their entrance.
-  const [replay, setReplay] = useState(0);
+  // `loading` dims the cards (first load, Refresh); `syncing` is a quiet background update.
+  const [loading, setLoading] = useState(() => !cachedData);
+  const [syncing, setSyncing] = useState(false);
+  // Bumped after a visible load so charts replay their entrance.
+  const [replay, setReplay] = useState(() => (cachedData ? 1 : 0));
   const [layout, setLayout] = useState<Layout>({ order: DEFAULT_ORDER, hidden: [] });
   const [layoutReady, setLayoutReady] = useState(false);
   const [entered, setEntered] = useState(false);
   const [customizeOpen, setCustomizeOpen] = useState(false);
+  // Filters live in a panel that slides open from the top bar, so the dashboard opens on the numbers.
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [exportState, setExportState] = useState<'idle' | 'busy' | 'done'>('idle');
   const { toast } = useToast();
   const notes = useDashboardToasts();
@@ -159,30 +187,28 @@ export default function AdminDashboard() {
 
   useFlipGrid(gridRef, `${layout.order.join(',')}|${layout.hidden.join(',')}`, entered);
 
-  const loadDashboard = useCallback(async (refresh = false) => {
-    setLoading(true);
+  const loadDashboard = useCallback(async (mode: 'initial' | 'refresh' | 'background') => {
+    if (mode === 'background') setSyncing(true);
+    else setLoading(true);
     try {
-      const [employeeRows, projectRows, locationRows, designationRows] = await Promise.all([
-        api.get('/employees'),
-        api.get('/projects'),
-        api.get('/locations'),
-        api.get('/designations'),
-      ]);
-      setEmployees(rowsFromResponse(employeeRows));
-      setProjects(rowsFromResponse(projectRows));
-      setLocations(rowsFromResponse(locationRows));
-      setDesignations(rowsFromResponse(designationRows));
-      setReplay((n) => n + 1);
-      if (refresh) pushNote('Dashboard refreshed');
+      const request = mode === 'initial' && prefetched ? prefetched : fetchDashboardData();
+      prefetched = null;
+      const next = await request;
+      cachedData = next;
+      setData(next);
+      // A background sync just glides the numbers to their new values.
+      if (mode !== 'background') setReplay((n) => n + 1);
+      if (mode === 'refresh') pushNote('Dashboard refreshed');
     } catch (error: any) {
       toast(error.message || 'Could not load dashboard data', 'error');
     } finally {
       setLoading(false);
+      setSyncing(false);
     }
   }, [toast, pushNote]);
 
   useEffect(() => {
-    loadDashboard();
+    loadDashboard(cachedData ? 'background' : 'initial');
   }, [loadDashboard]);
 
   // "/" jumps to the table search, like most data tools.
@@ -199,6 +225,15 @@ export default function AdminDashboard() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  useEffect(() => {
+    if (!filtersOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setFiltersOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [filtersOpen]);
 
   const projectLocations = useMemo(
     () => locations.filter((location) => !filters.projectId || location.projectId === filters.projectId),
@@ -221,24 +256,34 @@ export default function AdminDashboard() {
     [designations, filters.group],
   );
 
-  const filteredEmployees = useMemo(() => employees.filter((employee) => {
+  // Resolve each employee's group once; everything below reads `employee.group`.
+  const groupedEmployees = useMemo(
+    () => employees.map((employee) => ({ ...employee, group: resolveDesignationGroup(employee.designation?.name) })),
+    [employees],
+  );
+
+  const filteredEmployees = useMemo(() => groupedEmployees.filter((employee) => {
     if (filters.projectId && employee.projectId !== filters.projectId) return false;
     if (filters.viewScope === 'location' && filters.locationId && employee.locationId !== filters.locationId) return false;
-    if (filters.group && resolveDesignationGroup(employee.designation?.name) !== filters.group) return false;
+    if (filters.group && employee.group !== filters.group) return false;
     if (filters.designationId && employee.designationId !== filters.designationId) return false;
     if (filters.status && employee.status !== filters.status) return false;
     if (filters.workforce && employee.workforceCategory !== filters.workforce) return false;
     return true;
-  }), [employees, filters]);
+  }), [groupedEmployees, filters]);
 
   const totalEmployees = filteredEmployees.length;
   const activeEmployees = filteredEmployees.filter((employee) => employee.status === 'ACTIVE').length;
   const primaryCount = filteredEmployees.filter((employee) => employee.workforceCategory === 'PRIMARY').length;
 
-  const groupSummary = useMemo<GroupDatum[]>(() => GROUPS.map((group) => {
-    const count = filteredEmployees.filter((employee) => resolveDesignationGroup(employee.designation?.name) === group.name).length;
-    return { group: group.name, count, percentage: percent(count, totalEmployees), color: group.color };
-  }), [filteredEmployees, totalEmployees]);
+  const groupSummary = useMemo<GroupDatum[]>(() => {
+    const counts = new Map<DesignationGroup, number>();
+    filteredEmployees.forEach((employee) => counts.set(employee.group, (counts.get(employee.group) ?? 0) + 1));
+    return GROUPS.map((group) => {
+      const count = counts.get(group.name) ?? 0;
+      return { group: group.name, count, percentage: percent(count, totalEmployees), color: group.color };
+    });
+  }, [filteredEmployees, totalEmployees]);
 
   const countOf = (group: DesignationGroup) => groupSummary.find((row) => row.group === group)?.count ?? 0;
   const focusedGroup: DesignationGroup =
@@ -251,24 +296,30 @@ export default function AdminDashboard() {
     const base = (filters.projectId ? projectLocations : locations).filter((location) => (
       filters.viewScope !== 'location' || !filters.locationId || location.id === filters.locationId
     ));
-    const build = (id: string, name: string, match: (employee: any) => boolean) => {
+    // One pass: location -> group -> count.
+    const counts = new Map<string, Map<DesignationGroup, number>>();
+    filteredEmployees.forEach((employee) => {
+      const key = employee.locationId ?? 'unassigned';
+      const byGroup = counts.get(key) ?? new Map<DesignationGroup, number>();
+      byGroup.set(employee.group, (byGroup.get(employee.group) ?? 0) + 1);
+      counts.set(key, byGroup);
+    });
+    const build = (id: string, name: string) => {
       const row: LocationDatum = { id, location: name, total: 0 };
       GROUPS.forEach((group) => {
-        const count = filteredEmployees.filter((employee) => match(employee) && resolveDesignationGroup(employee.designation?.name) === group.name).length;
+        const count = counts.get(id)?.get(group.name) ?? 0;
         row[group.name] = count;
         row.total += count;
       });
       return row;
     };
-    const rows = base.map((location) => build(location.id, location.name, (employee) => employee.locationId === location.id));
-    if (filters.viewScope === 'all' && filteredEmployees.some((employee) => !employee.locationId)) {
-      rows.push(build('unassigned', 'Unassigned', (employee) => !employee.locationId));
-    }
+    const rows = base.map((location) => build(location.id, location.name));
+    if (filters.viewScope === 'all' && counts.has('unassigned')) rows.push(build('unassigned', 'Unassigned'));
     return rows.filter((row) => row.total > 0 || filters.projectId);
   }, [filteredEmployees, locations, projectLocations, filters.projectId, filters.viewScope, filters.locationId]);
 
   const designationDrilldown = useMemo<DrillDatum[]>(() => {
-    const inGroup = filteredEmployees.filter((employee) => resolveDesignationGroup(employee.designation?.name) === focusedGroup);
+    const inGroup = filteredEmployees.filter((employee) => employee.group === focusedGroup);
     const map = new Map<string, DrillDatum>();
     inGroup.forEach((employee) => {
       const designation = employee.designation?.name ?? 'Unassigned designation';
@@ -283,16 +334,16 @@ export default function AdminDashboard() {
   }, [filteredEmployees, focusedGroup]);
 
   const topDesignations = useMemo(() => {
+    const counts = new Map<DesignationGroup, Map<string, number>>();
+    filteredEmployees.forEach((employee) => {
+      const byName = counts.get(employee.group) ?? new Map<string, number>();
+      const name = employee.designation?.name ?? 'Unassigned designation';
+      byName.set(name, (byName.get(name) ?? 0) + 1);
+      counts.set(employee.group, byName);
+    });
     const result: Partial<Record<DesignationGroup, string>> = {};
-    GROUPS.forEach((group) => {
-      const counts = new Map<string, number>();
-      filteredEmployees.forEach((employee) => {
-        if (resolveDesignationGroup(employee.designation?.name) !== group.name) return;
-        const name = employee.designation?.name ?? 'Unassigned designation';
-        counts.set(name, (counts.get(name) ?? 0) + 1);
-      });
-      const top = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0];
-      if (top) result[group.name] = top[0];
+    counts.forEach((byName, group) => {
+      result[group] = Array.from(byName.entries()).sort((a, b) => b[1] - a[1])[0][0];
     });
     return result;
   }, [filteredEmployees]);
@@ -301,7 +352,7 @@ export default function AdminDashboard() {
     const groupTotals = new Map<DesignationGroup, number>();
     const locationTotals = new Map<string, number>();
     filteredEmployees.forEach((employee) => {
-      const group = resolveDesignationGroup(employee.designation?.name);
+      const group = employee.group;
       groupTotals.set(group, (groupTotals.get(group) ?? 0) + 1);
       const loc = employee.locationId ?? 'unassigned';
       locationTotals.set(loc, (locationTotals.get(loc) ?? 0) + 1);
@@ -309,7 +360,7 @@ export default function AdminDashboard() {
 
     const map = new Map<string, DistributionRow>();
     filteredEmployees.forEach((employee) => {
-      const group = resolveDesignationGroup(employee.designation?.name);
+      const group = employee.group;
       const designation = employee.designation?.name ?? 'Unassigned designation';
       const key = `${group}__${employee.designationId ?? designation}__${employee.locationId ?? 'unassigned'}`;
       const row = map.get(key) ?? {
@@ -456,8 +507,11 @@ export default function AdminDashboard() {
     detailsSheet['!cols'] = [{ wch: 18 }, { wch: 36 }, { wch: 24 }, { wch: 18 }, { wch: 14 }, { wch: 14 }];
     XLSX.utils.book_append_sheet(workbook, detailsSheet, 'Detailed Table');
 
+    // The dashboard only loads the fields it charts; names and emails are fetched for the export.
+    const filteredIds = new Set(filteredEmployees.map((employee) => employee.id));
+    const fullEmployees = rowsFromResponse(await api.get('/employees')).filter((employee: any) => filteredIds.has(employee.id));
     const employeesSheet = XLSX.utils.json_to_sheet(
-      filteredEmployees.map((employee) => ({
+      fullEmployees.map((employee: any) => ({
         Code: employee.employeeCode,
         Name: employee.name,
         Email: employee.email,
@@ -786,164 +840,194 @@ export default function AdminDashboard() {
 
   return (
     <>
-      <Topbar title="Workforce Dashboard" subtitle="Designation-group visual analytics across projects and locations" />
+      <Topbar
+        title="Workforce Dashboard"
+        subtitle="SOC, NOC, Infra, Application and Non-IT distribution across projects and locations"
+        actions={(
+          <div className={cn(inter.className, 'flex shrink-0 items-center gap-1.5')}>
+            <HeaderButton
+              icon={Filter}
+              label="Filters"
+              active={filtersOpen}
+              badge={chips.length || undefined}
+              onClick={() => setFiltersOpen((open) => !open)}
+              aria-expanded={filtersOpen}
+              aria-controls="wd-filters"
+            />
+            <HeaderButton icon={SlidersHorizontal} label="Customize" onClick={() => setCustomizeOpen(true)} />
+            <HeaderButton icon={RefreshCw} label="Refresh" spin={loading || syncing} disabled={loading} onClick={() => loadDashboard('refresh')} />
+            <button
+              type="button"
+              onClick={runExport}
+              disabled={loading || totalEmployees === 0}
+              aria-label="Export Excel"
+              className={cn(
+                'inline-flex h-8 items-center justify-center gap-1.5 rounded-[9px] px-2.5 text-[13px] font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-60 sm:min-w-[124px] sm:px-3',
+                exportState === 'done' ? 'bg-emerald-700' : 'bg-primary hover:bg-blue-700',
+              )}
+            >
+              {exportState === 'busy' ? <Loader2 className="h-4 w-4 animate-spin" /> : exportState === 'done' ? <Check className="h-4 w-4" /> : <Download className="h-4 w-4" />}
+              <span className="hidden sm:inline">{exportState === 'busy' ? 'Preparing…' : exportState === 'done' ? 'Exported' : 'Export Excel'}</span>
+            </button>
+          </div>
+        )}
+      />
       <TooltipProvider>
         <main className={cn(inter.className, 'wd-root min-h-[calc(100vh-3.5rem)] bg-[#f5f7fa] text-slate-900')}>
-          <div className="mx-auto flex max-w-[1360px] flex-col gap-5 px-4 py-6 md:px-6 md:py-7">
-            <header className="wd-enter flex flex-wrap items-end justify-between gap-4">
-              <div className="min-w-0">
-                <h2 className="text-2xl font-bold tracking-[-0.02em] text-slate-900 [text-wrap:balance]">Group-Based Workforce Visualizations</h2>
-                <p className="mt-1.5 max-w-[64ch] text-[13.5px] leading-relaxed text-slate-500">
-                  Workforce distribution across SOC, NOC, Infra, Application and Non-IT, by project, location, designation, status and workforce category.
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <HeaderButton icon={SlidersHorizontal} onClick={() => setCustomizeOpen(true)}>Customize</HeaderButton>
-                <HeaderButton icon={RefreshCw} spin={loading} disabled={loading} onClick={() => loadDashboard(true)}>Refresh</HeaderButton>
-                <button
-                  type="button"
-                  onClick={runExport}
-                  disabled={loading || totalEmployees === 0}
-                  className={cn(
-                    'inline-flex h-9 min-w-[132px] items-center justify-center gap-1.5 rounded-[10px] px-3.5 text-[13px] font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-60',
-                    exportState === 'done' ? 'bg-emerald-700' : 'bg-primary hover:bg-blue-700',
-                  )}
-                >
-                  {exportState === 'busy' ? <Loader2 className="h-4 w-4 animate-spin" /> : exportState === 'done' ? <Check className="h-4 w-4" /> : <Download className="h-4 w-4" />}
-                  {exportState === 'busy' ? 'Preparing…' : exportState === 'done' ? 'Exported' : 'Export Excel'}
-                </button>
-              </div>
-            </header>
-
-            <section className={cn(CARD_CLASS, 'wd-enter')} style={{ '--i': 1 } as CSSProperties} aria-label="Filters">
-              <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
-                <Field label="Project" htmlFor="wd-project">
-                  <Select
-                    id="wd-project"
-                    className={selectClass(!!filters.projectId)}
-                    value={filters.projectId}
-                    onChange={(event) => applyFilters({ projectId: event.target.value, locationId: '' })}
-                  >
-                    <option value="">All projects</option>
-                    {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-                  </Select>
-                </Field>
-                <Field label="Location" htmlFor="wd-location">
-                  <Select
-                    id="wd-location"
-                    className={selectClass(filters.viewScope === 'location')}
-                    value={filters.locationId}
-                    disabled={filters.viewScope === 'all'}
-                    onChange={(event) => applyFilters({ locationId: event.target.value })}
-                  >
-                    {filters.viewScope === 'all' && <option value="">All locations</option>}
-                    {filters.viewScope === 'location' && projectLocations.map((location) => (
-                      <option key={location.id} value={location.id}>{location.name}</option>
-                    ))}
-                  </Select>
-                </Field>
-                <Field label="Designation Group" htmlFor="wd-group">
-                  <Select
-                    id="wd-group"
-                    className={selectClass(!!filters.group)}
-                    value={filters.group}
-                    onChange={(event) => applyFilters({ group: event.target.value, designationId: '' })}
-                  >
-                    <option value="">All groups</option>
-                    {GROUPS.map((group) => <option key={group.name} value={group.name}>{group.name}</option>)}
-                  </Select>
-                </Field>
-                <Field label="Designation" htmlFor="wd-designation">
-                  <Select
-                    id="wd-designation"
-                    className={selectClass(!!filters.designationId)}
-                    value={filters.designationId}
-                    onChange={(event) => applyFilters({ designationId: event.target.value })}
-                  >
-                    <option value="">All designations</option>
-                    {designationOptions.map((designation) => <option key={designation.id} value={designation.id}>{designation.name}</option>)}
-                  </Select>
-                </Field>
-                <Field label="Status" htmlFor="wd-status">
-                  <Select
-                    id="wd-status"
-                    className={selectClass(!!filters.status)}
-                    value={filters.status}
-                    onChange={(event) => applyFilters({ status: event.target.value })}
-                  >
-                    <option value="">All statuses</option>
-                    {statusOptions.map((status) => <option key={status} value={status}>{labelize(status)}</option>)}
-                  </Select>
-                </Field>
-                <Field label="Workforce Category" htmlFor="wd-workforce">
-                  <Select
-                    id="wd-workforce"
-                    className={selectClass(!!filters.workforce)}
-                    value={filters.workforce}
-                    onChange={(event) => applyFilters({ workforce: event.target.value })}
-                  >
-                    <option value="">All categories</option>
-                    {workforceOptions.map((category) => <option key={category} value={category}>{labelize(category)}</option>)}
-                  </Select>
-                </Field>
-                <Field label="Table Search" htmlFor="wd-search">
-                  <div className="relative">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-                    <input
-                      id="wd-search"
-                      value={filters.search}
-                      onChange={(event) => setFilters((f) => ({ ...f, search: event.target.value }))}
-                      placeholder="Group, role, location"
-                      className={cn(
-                        'h-[38px] w-full rounded-[10px] border border-[#e6eaf0] bg-white pl-8 pr-3 text-[13px] transition-[border-color,box-shadow] hover:border-slate-300',
-                        'focus:border-primary focus:outline-none focus:ring-[3px] focus:ring-primary/15',
-                        filters.search && 'border-primary/45 bg-[#fbfcff]',
-                      )}
-                    />
-                  </div>
-                </Field>
-              </div>
-
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[#e6eaf0] pt-4">
-                <div role="group" aria-label="View" className="flex w-full gap-1 rounded-xl bg-[#f2f5f9] p-1 sm:inline-flex sm:w-auto">
-                  <ViewButton
-                    icon={Globe2}
-                    active={filters.viewScope === 'all'}
-                    onClick={() => filters.viewScope !== 'all' && applyFilters({ viewScope: 'all', locationId: '' })}
-                  >
-                    All Locations Combined View
-                  </ViewButton>
-                  <ViewButton
-                    icon={MapPin}
-                    active={filters.viewScope === 'location'}
-                    onClick={() => filters.viewScope !== 'location' && applyFilters({ viewScope: 'location', locationId: projectLocations[0]?.id ?? '' })}
-                  >
-                    Individual Location View
-                  </ViewButton>
-                </div>
-                <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-[12.5px] text-slate-500">
-                  {chips.length === 0 && <span>No filters applied</span>}
-                  {chips.map((chip) => (
-                    <span key={`${chip.key}:${chip.key === 'search' ? '' : chip.value}`} className="wd-chip-in inline-flex h-7 max-w-full items-center gap-1 rounded-full bg-[#eef3fe] pl-2.5 pr-1 text-primary">
-                      <span className="truncate">{chip.label}: <b className="font-semibold">{chip.value}</b></span>
-                      <button
-                        type="button"
-                        aria-label={`Remove ${chip.label} filter`}
-                        onClick={() => applyFilters(chip.clear)}
-                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full hover:bg-primary/10"
+          <div className="mx-auto flex max-w-[1360px] flex-col gap-4 px-4 py-4 md:px-6 md:py-5">
+            <div
+              className="grid transition-[grid-template-rows,margin] duration-300 ease-[cubic-bezier(.2,.7,.3,1)]"
+              style={{ gridTemplateRows: filtersOpen ? '1fr' : '0fr', marginBottom: filtersOpen ? 0 : -16 }}
+            >
+              <div
+                className="min-h-0 overflow-hidden"
+                aria-hidden={!filtersOpen}
+                style={{ visibility: filtersOpen ? 'visible' : 'hidden', transition: filtersOpen ? 'visibility 0s' : 'visibility 0s 300ms' }}
+              >
+                <section id="wd-filters" className={CARD_CLASS} aria-label="Filters">
+                  <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+                    <Field label="Project" htmlFor="wd-project">
+                      <Select
+                        id="wd-project"
+                        className={selectClass(!!filters.projectId)}
+                        value={filters.projectId}
+                        onChange={(event) => applyFilters({ projectId: event.target.value, locationId: '' })}
                       >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
-                  ))}
-                  {chips.length > 0 && (
-                    <button type="button" onClick={() => applyFilters(EMPTY_FILTERS, 'All filters cleared')} className="px-1 font-medium text-primary hover:underline">
-                      Clear all
+                        <option value="">All projects</option>
+                        {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+                      </Select>
+                    </Field>
+                    <Field label="Location" htmlFor="wd-location">
+                      <Select
+                        id="wd-location"
+                        className={selectClass(filters.viewScope === 'location')}
+                        value={filters.locationId}
+                        disabled={filters.viewScope === 'all'}
+                        onChange={(event) => applyFilters({ locationId: event.target.value })}
+                      >
+                        {filters.viewScope === 'all' && <option value="">All locations</option>}
+                        {filters.viewScope === 'location' && projectLocations.map((location) => (
+                          <option key={location.id} value={location.id}>{location.name}</option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <Field label="Designation Group" htmlFor="wd-group">
+                      <Select
+                        id="wd-group"
+                        className={selectClass(!!filters.group)}
+                        value={filters.group}
+                        onChange={(event) => applyFilters({ group: event.target.value, designationId: '' })}
+                      >
+                        <option value="">All groups</option>
+                        {GROUPS.map((group) => <option key={group.name} value={group.name}>{group.name}</option>)}
+                      </Select>
+                    </Field>
+                    <Field label="Designation" htmlFor="wd-designation">
+                      <Select
+                        id="wd-designation"
+                        className={selectClass(!!filters.designationId)}
+                        value={filters.designationId}
+                        onChange={(event) => applyFilters({ designationId: event.target.value })}
+                      >
+                        <option value="">All designations</option>
+                        {designationOptions.map((designation) => <option key={designation.id} value={designation.id}>{designation.name}</option>)}
+                      </Select>
+                    </Field>
+                    <Field label="Status" htmlFor="wd-status">
+                      <Select
+                        id="wd-status"
+                        className={selectClass(!!filters.status)}
+                        value={filters.status}
+                        onChange={(event) => applyFilters({ status: event.target.value })}
+                      >
+                        <option value="">All statuses</option>
+                        {statusOptions.map((status) => <option key={status} value={status}>{labelize(status)}</option>)}
+                      </Select>
+                    </Field>
+                    <Field label="Workforce Category" htmlFor="wd-workforce">
+                      <Select
+                        id="wd-workforce"
+                        className={selectClass(!!filters.workforce)}
+                        value={filters.workforce}
+                        onChange={(event) => applyFilters({ workforce: event.target.value })}
+                      >
+                        <option value="">All categories</option>
+                        {workforceOptions.map((category) => <option key={category} value={category}>{labelize(category)}</option>)}
+                      </Select>
+                    </Field>
+                    <Field label="Table Search" htmlFor="wd-search">
+                      <div className="relative">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                        <input
+                          id="wd-search"
+                          value={filters.search}
+                          onChange={(event) => setFilters((f) => ({ ...f, search: event.target.value }))}
+                          placeholder="Group, role, location"
+                          className={cn(
+                            'h-[38px] w-full rounded-[10px] border border-[#e6eaf0] bg-white pl-8 pr-3 text-[13px] transition-[border-color,box-shadow] hover:border-slate-300',
+                            'focus:border-primary focus:outline-none focus:ring-[3px] focus:ring-primary/15',
+                            filters.search && 'border-primary/45 bg-[#fbfcff]',
+                          )}
+                        />
+                      </div>
+                    </Field>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[#e6eaf0] pt-4">
+                    <div role="group" aria-label="View" className="flex w-full gap-1 rounded-xl bg-[#f2f5f9] p-1 sm:inline-flex sm:w-auto">
+                      <ViewButton
+                        icon={Globe2}
+                        active={filters.viewScope === 'all'}
+                        onClick={() => filters.viewScope !== 'all' && applyFilters({ viewScope: 'all', locationId: '' })}
+                      >
+                        All Locations Combined View
+                      </ViewButton>
+                      <ViewButton
+                        icon={MapPin}
+                        active={filters.viewScope === 'location'}
+                        onClick={() => filters.viewScope !== 'location' && applyFilters({ viewScope: 'location', locationId: projectLocations[0]?.id ?? '' })}
+                      >
+                        Individual Location View
+                      </ViewButton>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setFiltersOpen(false)}
+                      className="h-8 rounded-[9px] px-3 text-[13px] font-medium text-primary hover:bg-[#eef3fe]"
+                    >
+                      Done
                     </button>
-                  )}
-                </div>
+                  </div>
+                </section>
               </div>
-            </section>
+            </div>
+
+            {chips.length > 0 && (
+              <div className="wd-face flex min-w-0 flex-wrap items-center gap-1.5 text-[12.5px] text-slate-500">
+                <span className="mr-0.5 font-medium text-slate-600">Filtered by</span>
+                {chips.map((chip) => (
+                  <span key={`${chip.key}:${chip.key === 'search' ? '' : chip.value}`} className="wd-chip-in inline-flex h-7 max-w-full items-center gap-1 rounded-full bg-[#eef3fe] pl-2.5 pr-1 text-primary">
+                    <span className="truncate">{chip.label}: <b className="font-semibold">{chip.value}</b></span>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${chip.label} filter`}
+                      onClick={() => applyFilters(chip.clear)}
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full hover:bg-primary/10"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+                <button type="button" onClick={() => applyFilters(EMPTY_FILTERS, 'All filters cleared')} className="px-1 font-medium text-primary hover:underline">
+                  Clear all
+                </button>
+                {!filtersOpen && (
+                  <button type="button" onClick={() => setFiltersOpen(true)} className="px-1 font-medium text-slate-500 hover:text-slate-900 hover:underline">
+                    Edit filters
+                  </button>
+                )}
+              </div>
+            )}
 
             <div ref={gridRef} className="relative grid grid-flow-dense grid-cols-12 gap-4">
               {visibleIds.map((id, index) => {
@@ -1000,26 +1084,44 @@ function Field({ label, htmlFor, children }: { label: string; htmlFor: string; c
 
 function HeaderButton({
   icon: Icon,
+  label,
   spin,
+  active,
+  badge,
   disabled,
   onClick,
-  children,
+  ...aria
 }: {
   icon: typeof RefreshCw;
+  label: string;
   spin?: boolean;
+  active?: boolean;
+  badge?: number;
   disabled?: boolean;
   onClick: () => void;
-  children: ReactNode;
+  'aria-expanded'?: boolean;
+  'aria-controls'?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="inline-flex h-9 items-center gap-1.5 rounded-[10px] border border-[#e6eaf0] bg-white px-3.5 text-[13px] font-medium transition-colors hover:bg-[#f2f5f9] disabled:cursor-not-allowed disabled:opacity-60"
+      aria-label={label}
+      title={label}
+      {...aria}
+      className={cn(
+        'relative inline-flex h-8 items-center gap-1.5 rounded-[9px] border px-2 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60 lg:px-3',
+        active ? 'border-primary/40 bg-[#eef3fe] text-primary' : 'border-[#e6eaf0] bg-white text-slate-800 hover:bg-[#f2f5f9]',
+      )}
     >
-      <Icon className={cn('h-[15px] w-[15px] text-slate-500', spin && 'animate-spin')} />
-      {children}
+      <Icon className={cn('h-[15px] w-[15px]', active ? 'text-primary' : 'text-slate-500', spin && 'animate-spin')} />
+      <span className="hidden lg:inline">{label}</span>
+      {badge !== undefined && (
+        <span className="wd-chip-in flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-primary px-1 text-[11px] font-semibold text-white">
+          {badge}
+        </span>
+      )}
     </button>
   );
 }

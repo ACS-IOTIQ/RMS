@@ -91,6 +91,22 @@ export class EmployeesService {
     };
   }
 
+  /** Only the fields the admin dashboard aggregates on, so the payload stays small. */
+  dashboard() {
+    return this.prisma.employee.findMany({
+      select: {
+        id: true,
+        projectId: true,
+        locationId: true,
+        designationId: true,
+        status: true,
+        workforceCategory: true,
+        designation: { select: { name: true } },
+        location: { select: { name: true } },
+      },
+    });
+  }
+
   get(id: string) {
     return this.prisma.employee.findUnique({
       where: { id },
@@ -276,6 +292,7 @@ export class EmployeesController {
   }
 
   @Get('stats') stats() { return this.svc.stats(); }
+  @Roles(UserRole.ADMIN) @Get('dashboard') dashboard() { return this.svc.dashboard(); }
   @Get(':id') get(@Param('id') id: string) { return this.svc.get(id); }
   @Roles(UserRole.ADMIN) @Post() create(@Body() dto: EmployeeDto) { return this.svc.create(dto); }
   @Roles(UserRole.ADMIN) @Post('bulk') bulkCreate(@Body() dto: BulkEmployeeDto) { return this.svc.bulkCreate(dto.employees ?? []); }
